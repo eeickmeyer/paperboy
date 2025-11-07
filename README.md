@@ -1,5 +1,7 @@
 # **Paperboy (Vala + GTK)**
 
+![Alt text](https://github.com/thecalamityjoe87/paperboy/blob/main/images/screenshot.png?raw=true "Optional Title")
+
 A simple Vala/GTK news app. See the Build dependencies section below for distro-specific install commands.
 
 Build dependencies
