@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+  <!-- Grid squares representing different categories -->
+  <g fill="currentColor" fill-opacity="0.18">
+    <!-- Top row -->
+    <rect x="3" y="3" width="4" height="4" rx="1"/>
+    <rect x="10" y="3" width="4" height="4" rx="1"/>
+    <rect x="17" y="3" width="4" height="4" rx="1"/>
+    <!-- Middle row -->
+    <rect x="3" y="10" width="4" height="4" rx="1"/>
+    <rect x="10" y="10" width="4" height="4" rx="1"/>
+    <rect x="17" y="10" width="4" height="4" rx="1"/>
+    <!-- Bottom row -->
+    <rect x="3" y="17" width="4" height="4" rx="1"/>
+    <rect x="10" y="17" width="4" height="4" rx="1"/>
+    <rect x="17" y="17" width="4" height="4" rx="1"/>
+  </g>
+  <!-- Grid outline -->
+  <g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Outer grid -->
+    <rect x="2" y="2" width="20" height="20" rx="2"/>
+    <!-- Inner grid lines -->
+    <path d="M8 2v20"/>
+    <path d="M15 2v20"/>
+    <path d="M2 8h20"/>
+    <path d="M2 15h20"/>
+  </g>
+</svg>

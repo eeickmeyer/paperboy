@@ -1,0 +1,124 @@
+.card {
+    background-color: @card_bg_color;
+    border-radius: 12px;
+    border: 1px solid alpha(@borders, 0.1);
+    transition: all 200ms ease;
+    box-sizing: border-box;
+    overflow: hidden;
+    max-width: 100%;
+    min-width: 0;
+    flex-shrink: 1;
+}
+
+.card:hover,
+.card.card-hover {
+    box-shadow: 0 4px 8px alpha(@shade_color, 0.15);
+    transform: translateY(-2px);
+}
+
+.card picture {
+    background-color: @shade_color;
+    border-radius: 12px 12px 0 0;
+    max-width: 100%;
+    overflow: hidden;
+}
+
+.card image {
+    max-width: 100%;
+    height: auto;
+    object-fit: cover;
+}
+
+.card label {
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+    hyphens: auto;
+    max-width: 100%;
+}
+
+/* Small pill category chip overlaid on images */
+.category-chip {
+    background-color: alpha(black, 0.6);
+    color: white;
+    border-radius: 9999px;
+    padding: 2px 8px;
+    margin: 8px;
+    font-size: 0.8em;
+    font-weight: 600;
+}
+
+/* Badge for the top story hero card */
+.top-story-badge {
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    font-weight: 700;
+    margin-bottom: 4px;
+}
+
+/* Featured hero card styles */
+.card-featured {
+    padding-bottom: 14px;
+    max-width: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+.card-featured label {
+    font-size: 1.2em;
+    line-height: 1.3;
+    font-weight: 700;
+    max-width: 100%;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* (size variant styles removed) */
+
+.sidebar {
+    background-color: @sidebar_bg_color;
+}
+
+.sidebar .heading {
+    font-weight: bold;
+    font-size: 1.1em;
+}
+
+/* Load More button animations */
+.fade-in {
+    opacity: 1;
+    transition: opacity 400ms ease-in-out;
+}
+
+.fade-out {
+    opacity: 0;
+    transition: opacity 300ms ease-in-out;
+}
+
+.loading {
+    background-color: alpha(@accent_bg_color, 0.6);
+    color: alpha(@accent_fg_color, 0.8);
+    cursor: wait;
+}
+
+/* Header bar styling for split view - different background for sidebar vs content areas */
+.sidebar-header {
+    background: linear-gradient(to right, 
+        @sidebar_bg_color 0%, 
+        @sidebar_bg_color 280px, 
+        @borders 280px,
+        @borders 281px,
+        @headerbar_bg_color 281px, 
+        @headerbar_bg_color 100%);
+}
+
+/* When sidebar is collapsed, use normal header background */
+headerbar:not(.sidebar-header) {
+    background-color: @headerbar_bg_color;
+}
+
+/* Sidebar toggle button positioned at right edge of sidebar area in titlebar */
+.sidebar-toggle {
+    margin-right: 8px;
+    margin-top: 4px;
+    margin-bottom: 4px;
+}
