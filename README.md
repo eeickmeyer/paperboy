@@ -1,4 +1,4 @@
-Paperboy (Vala + GTK)
+# **Paperboy (Vala + GTK)**
 
 A simple Vala/GTK news app. See the Build dependencies section below for distro-specific install commands.
 
