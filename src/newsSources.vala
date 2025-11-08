@@ -109,6 +109,17 @@ public class NewsSources {
                                     "entertainment", 
                                     "politics", 
                                     "lifestyle" };
+
+        // If the selected source is Bloomberg, restrict "All News" to Bloomberg's available categories
+        if (source == NewsSource.BLOOMBERG) {
+            all_categories = new string[] { "markets", 
+                                            "industries", 
+                                            "economics", 
+                                            "wealth", 
+                                            "green", 
+                                            "politics", 
+                                            "technology" };
+        }
         
         // Shuffle the categories array for random order
         for (int i = all_categories.length - 1; i > 0; i--) {
@@ -126,6 +137,9 @@ public class NewsSources {
         }
 
         foreach (string category in selected_categories) {
+            // Copy loop variable into a local so each timeout closure captures
+            // its own category (avoids the common closure-capture bug).
+            string cat = category;
             // Use more varied delays between requests (200ms to 2 seconds)
             Timeout.add(Random.int_range(200, 2000), () => {
                 switch (source) {
@@ -160,10 +174,13 @@ public class NewsSources {
                             add_item);
                         break;
                     case NewsSource.BLOOMBERG:
-                        fetch_google_domain(category, current_search_query, session, 
+                        // For Bloomberg prefer dedicated feed fetching so categories
+                        // match Bloomberg's available sections instead of a generic
+                        // Google site search.
+                        fetch_bloomberg(cat, current_search_query, session,
                             (text) => { /* Keep "All News" label */ },
-                            () => { /* Don't clear items */ }, 
-                            add_item, "bloomberg.com", "Bloomberg");
+                            () => { /* Don't clear items */ },
+                            add_item);
                         break;
                     case NewsSource.REUTERS:
                         fetch_reuters(category, current_search_query, session, 
@@ -202,6 +219,11 @@ public class NewsSources {
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
+            case "markets": return "Markets";
+            case "industries": return "Industries";
+            case "economics": return "Economics";
+            case "wealth": return "Wealth";
+            case "green": return "Green";
             case "science": return "Science";
             case "sports": return "Sports";
             case "health": return "Health";

@@ -985,6 +985,11 @@ public class NewsWindow : Adw.ApplicationWindow {
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
+            case "markets": return "Markets";
+            case "industries": return "Industries";
+            case "economics": return "Economics";
+            case "wealth": return "Wealth";
+            case "green": return "Green";
             case "science": return "Science";
             case "sports": return "Sports";
             case "health": return "Health";
@@ -1055,6 +1060,25 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
         
         if (prefs.category == "all") {
+            // If the user selected "All News" but the active source is
+            // Bloomberg, only accept articles whose category is one of
+            // Bloomberg's available categories. This prevents showing
+            // unrelated categories that Bloomberg doesn't provide.
+            if (prefs.news_source == NewsSource.BLOOMBERG) {
+                string[] bloomberg_cats = { "markets", "industries", "economics", "wealth", "green", "politics", "technology" };
+                bool allowed = false;
+                foreach (string bc in bloomberg_cats) {
+                    if (bc == category_id) { allowed = true; break; }
+                }
+                if (!allowed) {
+                    // Drop articles from categories Bloomberg doesn't have
+                    if (debug_enabled()) {
+                        warning("Dropping article for Bloomber g: view=all source=Bloomberg article_cat=%s title=%s", category_id, title);
+                    }
+                    return;
+                }
+            }
+
             // For "All News", add to buffer for later shuffling
             var item = new ArticleItem(title, url, thumbnail_url, category_id);
             article_buffer.add(item);
