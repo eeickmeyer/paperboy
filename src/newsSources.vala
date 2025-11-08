@@ -418,7 +418,7 @@ public class NewsSources {
                     url = url + "&q=" + Uri.escape_string(current_search_query);
                 }
                 var msg = new Soup.Message("GET", url);
-                msg.request_headers.append("User-Agent", "news-vala-gnome/0.1");
+                msg.request_headers.append("User-Agent", "paperboy/0.1");
                 session.send_message(msg);
                 if (msg.status_code != 200) {
                     warning("HTTP error: %u", msg.status_code);
@@ -530,7 +530,7 @@ public class NewsSources {
                     url = @"https://www.reddit.com/r/$(subreddit)/search.json?q=$(Uri.escape_string(current_search_query))&restrict_sr=1&limit=30";
                 }
                 var msg = new Soup.Message("GET", url);
-                msg.request_headers.append("User-Agent", "news-vala-gnome/0.1");
+                msg.request_headers.append("User-Agent", "paperboy/0.1");
                 session.send_message(msg);
                 if (msg.status_code != 200) {
                     warning("HTTP error: %u", msg.status_code);

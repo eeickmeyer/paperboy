@@ -19,6 +19,7 @@
 using Gtk;
 using Adw;
 using Soup;
+using Tools;
 
 public class ArticleWindow : GLib.Object {
     private Adw.NavigationView nav_view;
@@ -54,7 +55,8 @@ public class ArticleWindow : GLib.Object {
         title_wrap.set_margin_top(16);
         title_wrap.set_halign(Gtk.Align.FILL);
         title_wrap.set_hexpand(true);
-        var ttl = new Gtk.Label(title);
+        // Decode any HTML entities that may be present in scraped titles
+        var ttl = new Gtk.Label(HtmlUtils.strip_html(title));
         ttl.add_css_class("title-2");
         ttl.set_xalign(0);
         ttl.set_wrap(true);
@@ -63,6 +65,16 @@ public class ArticleWindow : GLib.Object {
         ttl.set_selectable(true);
         ttl.set_justify(Gtk.Justification.LEFT);
         title_wrap.append(ttl);
+
+        // Metadata label (source + published date/time)
+        var meta_label = new Gtk.Label("");
+        meta_label.set_xalign(0);
+        meta_label.set_selectable(false);
+        meta_label.add_css_class("caption");
+        meta_label.set_halign(Gtk.Align.START);
+        meta_label.set_wrap(false);
+        meta_label.set_margin_top(4);
+        title_wrap.append(meta_label);
         outer.append(title_wrap);
 
         // Image (constrained)
@@ -141,18 +153,42 @@ public class ArticleWindow : GLib.Object {
         var page = new Adw.NavigationPage(sc, "Article");
         nav_view.push(page);
         back_btn.set_visible(true);
+        // Try to set metadata from any cached article entry (source + published time)
+        var prefs = NewsPreferences.get_instance();
+        string? homepage_published_any = null;
+        foreach (var item in parent_window.article_buffer) {
+            if (item.url == url && item.get_type().name() == "Paperboy.NewsArticle") {
+                var na = (Paperboy.NewsArticle)item;
+                homepage_published_any = na.published;
+                break;
+            }
+        }
+        if (homepage_published_any != null && homepage_published_any.length > 0) {
+            meta_label.set_text(get_source_name(prefs.news_source) + " • " + format_published(homepage_published_any));
+        } else {
+            meta_label.set_text(get_source_name(prefs.news_source));
+        }
 
         // Use homepage snippet for Fox News if available
-        var prefs = NewsPreferences.get_instance();
         if (prefs.news_source == NewsSource.FOX) {
             // Try to get snippet from parent_window/article_buffer
             string? homepage_snippet = null;
+            string? homepage_published = null;
             foreach (var item in parent_window.article_buffer) {
                 if (item.url == url && item.get_type().name() == "Paperboy.NewsArticle") {
-                    homepage_snippet = ((Paperboy.NewsArticle)item).snippet;
+                    var na = (Paperboy.NewsArticle)item;
+                    homepage_snippet = na.snippet;
+                    homepage_published = na.published;
                     break;
                 }
             }
+            if (homepage_published != null && homepage_published.length > 0) {
+                meta_label.set_text(get_source_name(prefs.news_source) + " • " + format_published(homepage_published));
+            } else {
+                // show just source name
+                meta_label.set_text(get_source_name(prefs.news_source));
+            }
+
             if (homepage_snippet != null && homepage_snippet.length > 0) {
                 snippet_label.set_text(homepage_snippet);
                 return;
@@ -162,7 +198,8 @@ public class ArticleWindow : GLib.Object {
         fetch_snippet_async(url, (text) => {
             string to_show = text.length > 0 ? text : "No preview available. Open the article to read more.";
             snippet_label.set_text(to_show);
-        });
+        }, meta_label);
+        
     }
 
     private void load_image_async(Gtk.Picture image, string url, int target_w, int target_h) {
@@ -635,9 +672,10 @@ public class ArticleWindow : GLib.Object {
     }
 
     // Fetch a short snippet from an article URL using common meta tags or first paragraph
-    private void fetch_snippet_async(string url, SnippetCallback on_done) {
+    private void fetch_snippet_async(string url, SnippetCallback on_done, Gtk.Label? meta_label = null) {
         new Thread<void*>("snippet-fetch", () => {
             string result = "";
+            string published = "";
             try {
                 var msg = new Soup.Message("GET", url);
                 msg.request_headers.append("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36");
@@ -649,12 +687,56 @@ public class ArticleWindow : GLib.Object {
                     buf[msg.response_body.length] = 0;
                     string html = (string) buf;
                     result = extract_snippet_from_html(html);
+                    // Try to extract published date/time from common meta tags or <time>
+                    try {
+                        string lower = html.down();
+                        int pos = 0;
+                        while ((pos = lower.index_of("<meta", pos)) >= 0) {
+                            int end = lower.index_of(">", pos);
+                            if (end < 0) break;
+                            string tag = html.substring(pos, end - pos + 1);
+                            string tl = lower.substring(pos, end - pos + 1);
+                            if (tl.index_of("datepublished") >= 0 || tl.index_of("article:published_time") >= 0 || tl.index_of("property=\"article:published_time\"") >= 0 || tl.index_of("name=\"pubdate\"") >= 0 || tl.index_of("itemprop=\"datePublished\"") >= 0) {
+                                string content = extract_attr(tag, "content");
+                                if (content != null && content.strip().length > 0) { published = content.strip(); break; }
+                            }
+                            pos = end + 1;
+                        }
+                        if (published.length == 0) {
+                            // search for <time datetime="...">
+                            int tpos = lower.index_of("<time");
+                            if (tpos >= 0) {
+                                int tend = lower.index_of(">", tpos);
+                                if (tend > tpos) {
+                                    string ttag = html.substring(tpos, tend - tpos + 1);
+                                    string dt = extract_attr(ttag, "datetime");
+                                    if (dt != null && dt.strip().length > 0) published = dt.strip();
+                                    else {
+                                        // fallback inner text
+                                        int close = lower.index_of("</time>", tend);
+                                            if (close > tend) {
+                                            string inner = html.substring(tend + 1, close - (tend + 1));
+                                            inner = HtmlUtils.strip_html(inner).strip();
+                                            if (inner.length > 0) published = inner;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } catch (GLib.Error e) { /* ignore */ }
                 }
             } catch (GLib.Error e) {
                 // ignore, use empty result
             }
             string final = result;
-            Idle.add(() => { on_done(final); return false; });
+            Idle.add(() => {
+                // If we discovered a published time, set the meta label too
+                if (meta_label != null && published.length > 0) {
+                    meta_label.set_text(get_source_name(NewsPreferences.get_instance().news_source) + " • " + format_published(published));
+                }
+                on_done(final);
+                return false;
+            });
             return null;
         });
     }
@@ -687,8 +769,8 @@ public class ArticleWindow : GLib.Object {
                            tl.index_of("name=\"twitter:description\"") >= 0;
             if (matches) {
                 string content = extract_attr(tag, "content");
-                if (content != null && content.strip().length > 0) {
-                    return truncate_snippet(strip_html(content), 280);
+                    if (content != null && content.strip().length > 0) {
+                    return truncate_snippet(HtmlUtils.strip_html(content), 280);
                 }
             }
             pos = end + 1;
@@ -700,84 +782,90 @@ public class ArticleWindow : GLib.Object {
             int p1end = lower.index_of(">", p1);
             if (p1end > p1) {
                 int p2 = lower.index_of("</p>", p1end);
-                if (p2 > p1end) {
+                    if (p2 > p1end) {
                     string inner = html.substring(p1end + 1, p2 - (p1end + 1));
-                    return truncate_snippet(strip_html(inner), 280);
+                    return truncate_snippet(HtmlUtils.strip_html(inner), 280);
                 }
             }
         }
         return "";
     }
 
-    private string strip_html(string s) {
-        var sb = new StringBuilder();
-        bool intag = false;
-        for (int i = 0; i < s.length; i++) {
-            char c = s[i];
-            if (c == '<') { intag = true; continue; }
-            if (c == '>') { intag = false; continue; }
-            if (!intag) sb.append_c(c);
-        }
-        string out = sb.str;
-
-        // First decode numeric HTML entities (both decimal and hexadecimal)
-        out = out.replace("&#x27;", "'");   // apostrophe
-        out = out.replace("&#X27;", "'");   // apostrophe (uppercase)
-        out = out.replace("&#x22;", "\"");  // quotation mark
-        out = out.replace("&#X22;", "\"");  // quotation mark (uppercase)
-        out = out.replace("&#x26;", "&");   // ampersand
-        out = out.replace("&#X26;", "&");   // ampersand (uppercase)
-        out = out.replace("&#x3C;", "<");   // less than
-        out = out.replace("&#X3C;", "<");   // less than (uppercase)
-        out = out.replace("&#x3E;", ">");   // greater than
-        out = out.replace("&#X3E;", ">");   // greater than (uppercase)
-        out = out.replace("&#x20;", " ");   // space  
-        out = out.replace("&#X20;", " ");   // space (uppercase)
-        out = out.replace("&#x2019;", "'"); // right single quotation mark
-        out = out.replace("&#X2019;", "'"); // right single quotation mark (uppercase)
-        out = out.replace("&#x201C;", """); // left double quotation mark
-        out = out.replace("&#X201C;", """); // left double quotation mark (uppercase)
-        out = out.replace("&#x201D;", """); // right double quotation mark
-        out = out.replace("&#X201D;", """); // right double quotation mark (uppercase)
-        out = out.replace("&#x2013;", "–"); // en dash
-        out = out.replace("&#X2013;", "–"); // en dash (uppercase)
-        out = out.replace("&#x2014;", "—"); // em dash
-        out = out.replace("&#X2014;", "—"); // em dash (uppercase)
-
-        // Common invisible / zero-width characters that appear in some feeds
-        out = out.replace("&#x200B;", ""); // zero-width space
-        out = out.replace("&#X200B;", ""); // zero-width space (uppercase X)
-        out = out.replace("&#8203;", ""); // zero-width space (decimal)
-        // Also remove any literal ZERO WIDTH chars that may have survived
-        out = out.replace("\u200B", "");
-        out = out.replace("\uFEFF", ""); // zero-width no-break space / BOM
-
-        // Then decode named HTML entities
-        out = out.replace("&amp;", "&");
-        out = out.replace("&lt;", "<");
-        out = out.replace("&gt;", ">");
-        out = out.replace("&quot;", "\"");
-        out = out.replace("&#39;", "'");
-        out = out.replace("&apos;", "'");
-        out = out.replace("&nbsp;", " ");
-        out = out.replace("&mdash;", "—");
-        out = out.replace("&ndash;", "–");
-        out = out.replace("&hellip;", "…");
-        out = out.replace("&rsquo;", "'");
-        out = out.replace("&lsquo;", "'");
-        out = out.replace("&rdquo;", """);
-        out = out.replace("&ldquo;", """);
-
-        // Clean whitespace
-        out = out.replace("\n", " ").replace("\r", " ").replace("\t", " ");
-        // collapse multiple spaces
-        while (out.index_of("  ") >= 0) out = out.replace("  ", " ");
-        return out.strip();
-    }
-
     private string truncate_snippet(string s, int maxlen) {
         if (s.length <= maxlen) return s;
         return s.substring(0, maxlen - 1) + "…";
+    }
+
+    // Convert raw published strings into a short, friendly representation.
+    // Examples:
+    //  - "2025-11-07T02:38:00.000Z" -> "Nov 7 • 02:38"
+    //  - "02:38:00.000" -> "02:38"
+    private string format_published(string raw) {
+        if (raw == null) return "";
+        string s = raw.strip();
+        if (s.length == 0) return "";
+
+        // If ISO-style date/time (contains 'T'), split into date/time
+        string date_part = "";
+        string time_part = s;
+        int tpos = s.index_of("T");
+        if (tpos >= 0) {
+            date_part = s.substring(0, tpos);
+            time_part = s.substring(tpos + 1);
+        }
+
+        // Trim timezone designators from time_part (Z or +hh:mm or -hh:mm)
+        int tzpos = time_part.index_of("Z");
+        if (tzpos < 0) tzpos = time_part.index_of("+");
+        if (tzpos < 0) tzpos = time_part.index_of("-");
+        if (tzpos >= 0) time_part = time_part.substring(0, tzpos);
+
+        // Extract HH:MM using regex
+        var tm_re = new Regex("([0-2][0-9]):([0-5][0-9])", RegexCompileFlags.DEFAULT);
+        MatchInfo tm_info;
+        if (tm_re.match(time_part, 0, out tm_info)) {
+            string hh = tm_info.fetch(1);
+            string mm = tm_info.fetch(2);
+            string hhmm = "%s:%s".printf(hh, mm);
+
+            if (date_part.length >= 8) {
+                // Try to parse YYYY-MM-DD
+                var d_re = new Regex("^(\\d{4})-(\\d{2})-(\\d{2})", RegexCompileFlags.DEFAULT);
+                MatchInfo d_info;
+                if (d_re.match(date_part, 0, out d_info)) {
+                    string year = d_info.fetch(1);
+                    string mo = d_info.fetch(2);
+                    string day = d_info.fetch(3);
+                    string mon_name = "";
+                    // Map month number to short name
+                    if (mo == "01") mon_name = "Jan";
+                    else if (mo == "02") mon_name = "Feb";
+                    else if (mo == "03") mon_name = "Mar";
+                    else if (mo == "04") mon_name = "Apr";
+                    else if (mo == "05") mon_name = "May";
+                    else if (mo == "06") mon_name = "Jun";
+                    else if (mo == "07") mon_name = "Jul";
+                    else if (mo == "08") mon_name = "Aug";
+                    else if (mo == "09") mon_name = "Sep";
+                    else if (mo == "10") mon_name = "Oct";
+                    else if (mo == "11") mon_name = "Nov";
+                    else if (mo == "12") mon_name = "Dec";
+                    // Trim leading zero from day for nicer display
+                    if (day.has_prefix("0")) day = day.substring(1);
+                    // Include year in the display per UX request
+                    return "%s %s, %s • %s".printf(mon_name, day, year, hhmm);
+                }
+            }
+
+            // Fallback: just return HH:MM
+            return hhmm;
+        }
+
+        // No time matched — strip milliseconds/extra and return trimmed
+        int dot = s.index_of(".");
+        if (dot >= 0) s = s.substring(0, dot);
+        if (s.has_suffix("Z")) s = s.substring(0, s.length - 1);
+        return s;
     }
 
     // Helper: clamp integer between bounds

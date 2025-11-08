@@ -113,6 +113,27 @@ public class ArticleScraper {
                                         article.snippet = strip_html(snippet);
                                     }
                                 }
+                                // Try to extract a time/datetime from the article block
+                                var time_dt_regex = new Regex("<time[^>]*datetime=\\\"([^\\\"]+)\\\"[^>]*>(.*?)</time>", RegexCompileFlags.DEFAULT);
+                                MatchInfo time_info;
+                                if (time_dt_regex.match(block, 0, out time_info)) {
+                                    // prefer datetime attribute if present
+                                    string dt_attr = time_info.fetch(1).strip();
+                                    if (dt_attr.length > 0) {
+                                        article.published = dt_attr;
+                                    } else {
+                                        string inner = time_info.fetch(2).strip();
+                                        if (inner.length > 0) article.published = strip_html(inner);
+                                    }
+                                } else {
+                                    // fallback: <time> without datetime attr
+                                    var time_simple = new Regex("<time[^>]*>(.*?)</time>", RegexCompileFlags.DEFAULT);
+                                    MatchInfo ts;
+                                    if (time_simple.match(block, 0, out ts)) {
+                                        string inner = ts.fetch(1).strip();
+                                        if (inner.length > 0) article.published = strip_html(inner);
+                                    }
+                                }
                                 articles.add(article);
                             }
                         }
@@ -171,6 +192,14 @@ public class ArticleScraper {
                                     }
                                 }
                             }
+                        }
+                    }
+                    // datePublished is commonly present in JSON-LD for NewsArticle
+                    if (obj.has_member("datePublished")) {
+                        try {
+                            article.published = obj.get_string_member("datePublished");
+                        } catch (GLib.Error e) {
+                            // ignore non-string datePublished formats for now
                         }
                     }
                     articles.add(article);

@@ -22,6 +22,9 @@ namespace Paperboy {
         public string url;
         public string? image_url;
         public string? snippet;
+        // Optional published date/time extracted from feeds or page metadata
+        // This is a raw string as found in the feed (ISO8601 or human-friendly)
+        public string? published;
         public NewsArticle() {}
     }
 }
