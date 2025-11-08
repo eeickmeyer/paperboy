@@ -111,9 +111,9 @@ public class NewsWindow : Adw.ApplicationWindow {
     private Gee.HashMap<string, int> category_column_counts;
     // Track recent category placements to prevent horizontal clustering
     private Gee.ArrayList<string> recent_categories;
-    // Simple counter for round-robin distribution in "All News"
+    // Simple counter for round-robin distribution in "All Categories"
     private int next_column_index;
-    // Buffer for articles when in "All News" mode to allow shuffling
+    // Buffer for articles when in "All Categories" mode to allow shuffling
     public Gee.ArrayList<ArticleItem> article_buffer;
     // Track hero image request metadata so we can re-fetch on resize
     private Gee.HashMap<Gtk.Picture, HeroRequest> hero_requests;
@@ -402,9 +402,9 @@ public class NewsWindow : Adw.ApplicationWindow {
             child = next;
         }
 
-        // Always include All News
-        sidebar_add_row("All News", "all", prefs.category == "all");
-        sidebar_add_header("Categories");
+    // Categories header, then include the "All Categories" option under it
+    sidebar_add_header("Categories");
+    sidebar_add_row("All Categories", "all", prefs.category == "all");
 
         if (prefs.news_source == NewsSource.BLOOMBERG) {
             // Bloomberg-specific categories
@@ -794,9 +794,9 @@ public class NewsWindow : Adw.ApplicationWindow {
     sidebar_list.set_selection_mode(SelectionMode.SINGLE);
     sidebar_list.set_activate_on_single_click(true);
 
-        // Populate sidebar using helper methods
-        sidebar_add_row("All News", "all", prefs.category == "all");
-        sidebar_add_header("Categories");
+    // Populate sidebar using helper methods: show header first, then "All Categories"
+    sidebar_add_header("Categories");
+    sidebar_add_row("All Categories", "all", prefs.category == "all");
         // Default site categories (will be rebuilt for sources like Bloomberg)
         sidebar_add_row("World News", "general", prefs.category == "general");
         sidebar_add_row("US News", "us", prefs.category == "us");
@@ -1114,7 +1114,7 @@ public class NewsWindow : Adw.ApplicationWindow {
 
     private string category_display_name_for(string cat) {
         switch (cat) {
-            case "all": return "All News";
+            case "all": return "All Categories";
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
@@ -1193,7 +1193,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
         
         if (prefs.category == "all") {
-            // If the user selected "All News" but the active source is
+            // If the user selected "All Categories" but the active source is
             // Bloomberg, only accept articles whose category is one of
             // Bloomberg's available categories. This prevents showing
             // unrelated categories that Bloomberg doesn't provide.
@@ -1212,7 +1212,7 @@ public class NewsWindow : Adw.ApplicationWindow {
                 }
             }
 
-            // For "All News", add to buffer for later shuffling
+        // For "All Categories", add to buffer for later shuffling
             var item = new ArticleItem(title, url, thumbnail_url, category_id);
             article_buffer.add(item);
             
@@ -1231,7 +1231,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
     }
     
-    // Called when all articles have been fetched for "All News" mode
+    // Called when all articles have been fetched for "All Categories" mode
     public void flush_article_buffer() {
         if (prefs.category != "all" || article_buffer.size == 0) {
             return;
@@ -1304,7 +1304,7 @@ public class NewsWindow : Adw.ApplicationWindow {
     }
     
     private void add_item_immediate_to_column(string title, string url, string? thumbnail_url, string category_id, int forced_column = -1, string? original_category = null) {
-        // Check article limit for "All News" mode FIRST
+    // Check article limit for "All Categories" mode FIRST
         // Use original_category if provided (for when category is temporarily overridden)
         string check_category = original_category ?? prefs.category;
         if (check_category == "all" && articles_shown >= INITIAL_ARTICLE_LIMIT && load_more_button == null) {
@@ -1312,7 +1312,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             return; // Stop adding articles until user clicks "Load More"
         }
         
-        // Smart column selection for "All News" to prevent category clustering
+    // Smart column selection for "All Categories" to prevent category clustering
         int target_col = -1;
         if (prefs.category == "all" && forced_column == -1) {
             // Light anti-clustering: only prevent very long runs (4+ consecutive)
@@ -1348,7 +1348,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             next_column_index = (next_column_index + 1) % columns.length;
         }
         
-        // For "All News", randomly select hero from first few items (not always the first)
+    // For "All Categories", randomly select hero from first few items (not always the first)
         // For specific categories, keep the first item as hero for consistency
         bool should_be_hero = false;
         if (!featured_used) {
@@ -1770,7 +1770,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
         columns[target_col].append(card);
         
-        // Increment article counter for "All News" mode
+    // Increment article counter for "All Categories" mode
         // Use original_category if provided (for when category is temporarily overridden)
         string current_category = original_category ?? prefs.category;
         if (current_category == "all") {

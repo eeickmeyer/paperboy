@@ -93,9 +93,9 @@ public class NewsSources {
     ) {
         string source_name = get_source_name(source);
         if (current_search_query.length > 0) {
-            set_label(@"Search Results: \"$(current_search_query)\" in All News — $(source_name)");
+            set_label(@"Search Results: \"$(current_search_query)\" in All Categories — $(source_name)");
         } else {
-            set_label(@"All News — $(source_name)");
+            set_label(@"All Categories — $(source_name)");
         }
         clear_items();
 
@@ -110,7 +110,7 @@ public class NewsSources {
                                     "politics", 
                                     "lifestyle" };
 
-        // If the selected source is Bloomberg, restrict "All News" to Bloomberg's available categories
+    // If the selected source is Bloomberg, restrict "All Categories" to Bloomberg's available categories
         if (source == NewsSource.BLOOMBERG) {
             all_categories = new string[] { "markets", 
                                             "industries", 
@@ -145,31 +145,31 @@ public class NewsSources {
                 switch (source) {
                     case NewsSource.GUARDIAN:
                         fetch_guardian(category, current_search_query, session, 
-                            (text) => { /* Keep "All News" label */ },
+                            (text) => { /* Keep "All Categories" label */ },
                             () => { /* Don't clear items */ }, 
                             add_item);
                         break;
                     case NewsSource.WALL_STREET_JOURNAL:
                         fetch_google_domain(category, current_search_query, session, 
-                            (text) => { /* Keep "All News" label */ },
+                            (text) => { /* Keep "All Categories" label */ },
                             () => { /* Don't clear items */ }, 
                             add_item, "wsj.com", "Wall Street Journal");
                         break;
                     case NewsSource.REDDIT:
                         fetch_reddit(category, current_search_query, session, 
-                            (text) => { /* Keep "All News" label */ },
+                            (text) => { /* Keep "All Categories" label */ },
                             () => { /* Don't clear items */ }, 
                             add_item);
                         break;
                     case NewsSource.BBC:
                         fetch_bbc(category, current_search_query, session, 
-                            (text) => { /* Keep "All News" label */ },
+                            (text) => { /* Keep "All Categories" label */ },
                             () => { /* Don't clear items */ }, 
                             add_item);
                         break;
                     case NewsSource.NEW_YORK_TIMES:
                         fetch_nyt(category, current_search_query, session, 
-                            (text) => { /* Keep "All News" label */ },
+                            (text) => { /* Keep "All Categories" label */ },
                             () => { /* Don't clear items */ }, 
                             add_item);
                         break;
@@ -178,25 +178,25 @@ public class NewsSources {
                         // match Bloomberg's available sections instead of a generic
                         // Google site search.
                         fetch_bloomberg(cat, current_search_query, session,
-                            (text) => { /* Keep "All News" label */ },
+                            (text) => { /* Keep "All Categories" label */ },
                             () => { /* Don't clear items */ },
                             add_item);
                         break;
                     case NewsSource.REUTERS:
                         fetch_reuters(category, current_search_query, session, 
-                            (text) => { /* Keep "All News" label */ },
+                            (text) => { /* Keep "All Categories" label */ },
                             () => { /* Don't clear items */ }, 
                             add_item);
                         break;
                     case NewsSource.NPR:
                         fetch_npr(category, current_search_query, session, 
-                            (text) => { /* Keep "All News" label */ },
+                            (text) => { /* Keep "All Categories" label */ },
                             () => { /* Don't clear items */ }, 
                             add_item);
                         break;
                     case NewsSource.FOX:
                         fetch_fox(category, current_search_query, session, 
-                            (text) => { /* Keep "All News" label */ },
+                            (text) => { /* Keep "All Categories" label */ },
                             () => { /* Don't clear items */ }, 
                             add_item);
                         break;
@@ -215,7 +215,7 @@ public class NewsSources {
     }
     private static string category_display_name(string cat) {
         switch (cat) {
-            case "all": return "All News";
+            case "all": return "All Categories";
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
