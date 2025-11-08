@@ -89,6 +89,7 @@ public class NewsWindow : Adw.ApplicationWindow {
     private Gtk.Image source_logo;
     private Gtk.ToggleButton sidebar_toggle;
     private Gtk.Box sidebar_spacer;
+    private Gtk.ListBox sidebar_list;
     private Adw.OverlaySplitView split_view;
     private Gtk.ScrolledWindow sidebar_scrolled;
     private NewsPreferences prefs;
@@ -213,6 +214,11 @@ public class NewsWindow : Adw.ApplicationWindow {
         switch (cat) {
             case "all": filename = "all-mono.svg"; break;
             case "general": filename = "world-mono.svg"; break;
+            case "markets": filename = "markets-mono.svg"; break;
+            case "industries": filename = "industries-mono.svg"; break;
+            case "economics": filename = "economics-mono.svg"; break;
+            case "wealth": filename = "wealth-mono.svg"; break;
+            case "green": filename = "green-mono.svg"; break;
             case "us": filename = "us-mono.svg"; break;
             case "technology": filename = "technology-mono.svg"; break;
             case "science": filename = "science-mono.svg"; break;
@@ -291,6 +297,81 @@ public class NewsWindow : Adw.ApplicationWindow {
                 }
         }
         return null;
+    }
+
+    // Helper to add a section header to the sidebar
+    private void sidebar_add_header(string title) {
+        var header_row = new Adw.ActionRow();
+        header_row.set_title(title);
+        header_row.activatable = false;
+        header_row.add_css_class("caption-heading");
+        header_row.set_margin_top(12);
+        header_row.set_margin_bottom(6);
+        sidebar_list.append(header_row);
+    }
+
+    // Helper to add a row with optional icon and switch category
+    private void sidebar_add_row(string title, string cat, bool selected=false) {
+        var row = new Adw.ActionRow();
+        row.set_title(title);
+        row.activatable = true;
+        // Use a holder box for the icon so we can replace it on theme changes
+        var holder = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 0);
+        holder.set_hexpand(false);
+        holder.set_vexpand(false);
+        // Prefer custom icons bundled with the app; fall back to theme icons
+        var prefix_widget = create_category_icon(cat);
+        if (prefix_widget != null) { holder.append(prefix_widget); }
+        row.add_prefix(holder);
+        sidebar_icon_holders.set(cat, holder);
+
+        row.activated.connect(() => {
+            prefs.category = cat;
+            prefs.save_config();
+            fetch_news();
+            sidebar_list.select_row(row);
+        });
+        sidebar_list.append(row);
+        if (selected) sidebar_list.select_row(row);
+    }
+
+    // Rebuild the sidebar rows according to the currently selected source
+    private void rebuild_sidebar_rows_for_source() {
+        // Clear existing rows
+        Gtk.Widget? child = sidebar_list.get_first_child();
+        while (child != null) {
+            Gtk.Widget? next = child.get_next_sibling();
+            sidebar_list.remove(child);
+            child = next;
+        }
+
+        // Always include All News
+        sidebar_add_row("All News", "all", prefs.category == "all");
+        sidebar_add_header("Categories");
+
+        if (prefs.news_source == NewsSource.BLOOMBERG) {
+            // Bloomberg-specific categories
+            sidebar_add_row("Markets", "markets", prefs.category == "markets");
+            sidebar_add_row("Industries", "industries", prefs.category == "industries");
+            sidebar_add_row("Economics", "economics", prefs.category == "economics");
+            sidebar_add_row("Wealth", "wealth", prefs.category == "wealth");
+            sidebar_add_row("Green", "green", prefs.category == "green");
+            // Keep technology for Bloomberg as well
+            sidebar_add_row("Technology", "technology", prefs.category == "technology");
+            // Also expose politics for completeness
+            sidebar_add_row("Politics", "politics", prefs.category == "politics");
+        } else {
+            // Default set used for most sources
+            sidebar_add_row("World News", "general", prefs.category == "general");
+            sidebar_add_row("US News", "us", prefs.category == "us");
+            sidebar_add_row("Technology", "technology", prefs.category == "technology");
+            sidebar_add_row("Science", "science", prefs.category == "science");
+            sidebar_add_row("Sports", "sports", prefs.category == "sports");
+            sidebar_add_row("Health", "health", prefs.category == "health");
+            sidebar_add_row("Entertainment", "entertainment", prefs.category == "entertainment");
+            sidebar_add_row("Politics", "politics", prefs.category == "politics");
+            sidebar_add_row("Lifestyle", "lifestyle", prefs.category == "lifestyle");
+        }
     }
 
     // Update the source logo and label based on current news source
@@ -584,59 +665,24 @@ public class NewsWindow : Adw.ApplicationWindow {
         header.pack_end(menu_button);
         
         toolbar_view.add_top_bar(header);
-        var sidebar_list = new Gtk.ListBox();
-        sidebar_list.add_css_class("navigation-sidebar");
-        sidebar_list.set_selection_mode(SelectionMode.SINGLE);
-        sidebar_list.set_activate_on_single_click(true);
+    sidebar_list = new Gtk.ListBox();
+    sidebar_list.add_css_class("navigation-sidebar");
+    sidebar_list.set_selection_mode(SelectionMode.SINGLE);
+    sidebar_list.set_activate_on_single_click(true);
 
-        // Helper to add a section header
-        void add_header(string title) {
-            var header_row = new Adw.ActionRow();
-            header_row.set_title(title);
-            header_row.activatable = false;
-            header_row.add_css_class("caption-heading");
-            header_row.set_margin_top(12);
-            header_row.set_margin_bottom(6);
-            sidebar_list.append(header_row);
-        }
-
-        // Helper to add a row with optional icon and switch category
-        void add_row(string title, string cat, bool selected=false) {
-            var row = new Adw.ActionRow();
-            row.set_title(title);
-            row.activatable = true;
-            // Use a holder box for the icon so we can replace it on theme changes
-            var holder = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 0);
-            holder.set_hexpand(false);
-            holder.set_vexpand(false);
-            // Prefer custom icons bundled with the app; fall back to theme icons
-            var prefix_widget = create_category_icon(cat);
-            if (prefix_widget != null) { holder.append(prefix_widget); }
-            row.add_prefix(holder);
-            sidebar_icon_holders.set(cat, holder);
-
-            row.activated.connect(() => {
-                prefs.category = cat;
-                prefs.save_config();
-                fetch_news();
-                sidebar_list.select_row(row);
-            });
-            sidebar_list.append(row);
-            if (selected) sidebar_list.select_row(row);
-        }
-
-        add_row("All News", "all", prefs.category == "all");
-        
-        add_header("Categories");
-        add_row("World News", "general", prefs.category == "general");
-        add_row("US News", "us", prefs.category == "us");
-        add_row("Technology", "technology", prefs.category == "technology");
-        add_row("Science", "science", prefs.category == "science");
-        add_row("Sports", "sports", prefs.category == "sports");
-        add_row("Health", "health", prefs.category == "health");
-        add_row("Entertainment", "entertainment", prefs.category == "entertainment");
-        add_row("Politics", "politics", prefs.category == "politics");
-        add_row("Lifestyle", "lifestyle", prefs.category == "lifestyle");
+        // Populate sidebar using helper methods
+        sidebar_add_row("All News", "all", prefs.category == "all");
+        sidebar_add_header("Categories");
+        // Default site categories (will be rebuilt for sources like Bloomberg)
+        sidebar_add_row("World News", "general", prefs.category == "general");
+        sidebar_add_row("US News", "us", prefs.category == "us");
+        sidebar_add_row("Technology", "technology", prefs.category == "technology");
+        sidebar_add_row("Science", "science", prefs.category == "science");
+        sidebar_add_row("Sports", "sports", prefs.category == "sports");
+        sidebar_add_row("Health", "health", prefs.category == "health");
+        sidebar_add_row("Entertainment", "entertainment", prefs.category == "entertainment");
+        sidebar_add_row("Politics", "politics", prefs.category == "politics");
+        sidebar_add_row("Lifestyle", "lifestyle", prefs.category == "lifestyle");
 
         sidebar_scrolled = new Gtk.ScrolledWindow();
         sidebar_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
@@ -912,6 +958,8 @@ public class NewsWindow : Adw.ApplicationWindow {
             // Move button to right edge when sidebar is shown
             sidebar_spacer.set_size_request(100, -1);
         }
+        // Rebuild rows to reflect source-specific categories (e.g., Bloomberg)
+        rebuild_sidebar_rows_for_source();
     }
 
     // Replace the icon in each sidebar row holder according to the active theme

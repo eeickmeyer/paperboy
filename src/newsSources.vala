@@ -46,19 +46,6 @@ public class NewsSources {
         ClearItemsFunc clear_items,
         AddItemFunc add_item
     ) {
-        // For Bloomberg, always show all categories in the sidebar
-        if (source == NewsSource.BLOOMBERG && current_category == "all") {
-            string[] bloomberg_categories = { "general", "technology", "us", "science", "sports", "health", "entertainment", "politics", "lifestyle" };
-            set_label("Bloomberg — All Categories");
-            clear_items();
-            foreach (string category in bloomberg_categories) {
-                Timeout.add(Random.int_range(200, 1200), () => {
-                    fetch_google_domain(category, current_search_query, session, (text) => {}, () => {}, add_item, "bloomberg.com", "Bloomberg");
-                    return false;
-                });
-            }
-            return;
-        }
         // Handle "all" category by fetching from multiple categories for other sources
         if (current_category == "all") {
             fetch_all_categories(source, current_search_query, session, set_label, clear_items, add_item);
@@ -81,7 +68,7 @@ public class NewsSources {
                 fetch_nyt(current_category, current_search_query, session, set_label, clear_items, add_item);
                 break;
             case NewsSource.BLOOMBERG:
-                fetch_google_domain(current_category, current_search_query, session, set_label, clear_items, add_item, "bloomberg.com", "Bloomberg");
+                fetch_bloomberg(current_category, current_search_query, session, set_label, clear_items, add_item);
                 break;
             case NewsSource.REUTERS:
                 fetch_reuters(current_category, current_search_query, session, set_label, clear_items, add_item);
@@ -604,7 +591,51 @@ public class NewsSources {
         AddItemFunc add_item
     ) {
         // Reuters RSS feeds require authentication, so use Google News site search
+        // Reuters also doesn't provide images for its RSS feed.
         fetch_google_domain(current_category, current_search_query, session, set_label, clear_items, add_item, "reuters.com", "Reuters");
+    }
+
+    // Bloomberg doesn't present tradional news (i.e. doesn't have regular feeds). That's ok, let's just present the categories they do have.
+    private static void fetch_bloomberg(
+        string current_category,
+        string current_search_query,
+        Soup.Session session,
+        SetLabelFunc set_label,
+        ClearItemsFunc clear_items,
+        AddItemFunc add_item
+    ) {
+        if (current_search_query.length > 0) {
+            fetch_google_domain(current_category, current_search_query, session, set_label, clear_items, add_item, "bloomberg.com", "Bloomberg");
+            return;
+        }
+        string url = "https://feeds.bloomberg.com/markets/news.rss";
+        switch (current_category) {
+            case "technology":
+                url = "https://feeds.bloomberg.com/technology/news.rss";
+                break;
+            case "industries":
+                url = "https://feeds.bloomberg.com/industries/news.rss";
+                break;
+            case "markets":
+                url = "https://feeds.bloomberg.com/markets/news.rss";
+                break;
+            case "economics":
+                url = "https://feeds.bloomberg.com/economics/news.rss";
+                break;
+            case "wealth":
+                url = "https://feeds.bloomberg.com/wealth/news.rss";
+                break;
+            case "green":
+                url = "https://feeds.bloomberg.com/green/news.rss";
+                break;
+            case "politics":
+                url = "https://feeds.bloomberg.com/politics/news.rss";
+                break;
+            default:
+                url = "https://feeds.bloomberg.com/markets/news.rss";
+                break;
+        }
+        RssParser.fetch_rss_url(url, "Bloomberg", category_display_name(current_category), current_category, current_search_query, session, set_label, clear_items, add_item);
     }
 
     private static void fetch_npr(
@@ -704,98 +735,7 @@ public class NewsSources {
                     return null;
                 }
 
-                Gee.ArrayList<Paperboy.NewsArticle> articles = new Gee.ArrayList<Paperboy.NewsArticle>();
-                int max_sections = 2; // Limit to 2 section URLs to avoid long lockups
-                int section_count = 0;
-                foreach (string candidate_url in section_urls) {
-                    if (section_count >= max_sections) break;
-                    section_count++;
-                    var msg = new Soup.Message("GET", candidate_url);
-                    msg.request_headers.append("User-Agent", "Mozilla/5.0 (Linux; rv:91.0) Gecko/20100101 Firefox/91.0");
-                    msg.request_headers.append("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8");
-                    msg.request_headers.append("Accept-Language", "en-US,en;q=0.5");
-                    msg.request_headers.append("Cache-Control", "no-cache");
-                    session.timeout = 8; // 8 second timeout to avoid hanging
-                    session.send_message(msg);
-                    if (msg.status_code != 200) continue;
-                    string body = (string) msg.response_body.flatten().data;
-
-                    var ld_regex = /<script[^>]*type=\"application\/ld\+json\"[^>]*>([\s\S]*?)<\/script>/;
-                    MatchInfo ld_info;
-                    if (ld_regex.match(body, 0, out ld_info)) {
-                        do {
-                            string json_ld = ld_info.fetch(1);
-                            parse_fox_json_ld(json_ld, articles);
-                        } while (ld_info.next());
-                    }
-                    if (articles.size == 0) {
-                        var article_block_regex = /<article[\s\S]*?<\/article>/;
-                        MatchInfo block_info;
-                        if (article_block_regex.match(body, 0, out block_info)) {
-                            int batch_limit = 18; // Limit to 18 articles per section
-                            int batch_count = 0;
-                            do {
-                                if (batch_count >= batch_limit) break;
-                                batch_count++;
-                                string block = block_info.fetch(0);
-                                var headline_regex = /<h2[^>]*>\s*<a[^>]*href=\"(\/[^"]+)\"[^>]*>(.*?)<\/a>\s*<\/h2>/;
-                                var headline_h_regex = /<h[1-4][^>]*>\s*<a[^>]*href=\"(\/[^"]+)\"[^>]*>(.*?)<\/a>\s*<\/h[1-4]>/;
-                                var anchor_class_regex = /<a[^>]*href=\"(\/[^"]+)\"[^>]*class=\"[^"]*(?:title|headline|story|article)[^"]*\"[^>]*>(.*?)<\/a>/;
-                                MatchInfo headline_info;
-                                string rel_url = null;
-                                string title = null;
-                                if (headline_regex.match(block, 0, out headline_info)) {
-                                    rel_url = headline_info.fetch(1);
-                                    title = headline_info.fetch(2).strip();
-                                } else if (headline_h_regex.match(block, 0, out headline_info)) {
-                                    rel_url = headline_info.fetch(1);
-                                    title = headline_info.fetch(2).strip();
-                                } else if (anchor_class_regex.match(block, 0, out headline_info)) {
-                                    rel_url = headline_info.fetch(1);
-                                    title = headline_info.fetch(2).strip();
-                                } else {
-                                    var anchor_fallback = /<a[^>]*href=\"(\/[^"]+)\"[^>]*>([^<]{30,}?)<\/a>/;
-                                    MatchInfo af_info;
-                                    if (anchor_fallback.match(block, 0, out af_info)) {
-                                        rel_url = af_info.fetch(1);
-                                        title = af_info.fetch(2).strip();
-                                    }
-                                }
-                                if (rel_url != null && title != null) {
-                                    string url = rel_url.has_prefix("http") ? rel_url : "https://www.foxnews.com" + rel_url;
-                                    if (title.length > 10 && !is_duplicate_url(articles, url)) {
-                                        var article = new Paperboy.NewsArticle();
-                                        article.title = title;
-                                        article.url = url;
-                                        var img_regex = /<img[^>]*src=\"(https:\/\/static\.foxnews\.com[^"]+)\"[^>]*alt=\"([^"]*)\"[^>]*>/;
-                                        MatchInfo img_info;
-                                        if (img_regex.match(block, 0, out img_info)) {
-                                            do {
-                                                string img_url = img_info.fetch(1);
-                                                string alt_text = img_info.fetch(2);
-                                                if (!(img_url.contains("og-fox-news.png") || img_url.contains("logo") || img_url.contains("favicon") || alt_text.contains("Fox News"))) {
-                                                    article.image_url = img_url;
-                                                    break;
-                                                }
-                                            } while (img_info.next());
-                                        }
-                                        var p_regex = /<p[^>]*>(.*?)<\/p>/;
-                                        MatchInfo p_info;
-                                        if (p_regex.match(block, 0, out p_info)) {
-                                            string snippet = p_info.fetch(1).strip();
-                                            if (snippet.length > 0) {
-                                                article.snippet = strip_html(snippet);
-                                            }
-                                        }
-                                        articles.add(article);
-                                    }
-                                }
-                            } while (block_info.next());
-                        }
-                    }
-                    Tools.ImageExtractor.extract_article_images_from_html(body, articles, "static.foxnews.com");
-                    if (articles.size > 0) break;
-                }
+                Gee.ArrayList<Paperboy.NewsArticle> articles = ArticleScraper.scrape_section_urls(section_urls, "https://www.foxnews.com", current_search_query, session);
                 // UI batching: add articles in small batches with short delays
                 Idle.add(() => {
                     string category_name = category_display_name(current_category) + " — Fox News";
@@ -831,65 +771,6 @@ public class NewsSources {
             return null;
         });
     }
-
-    private static void parse_fox_json_ld(string json_content, Gee.ArrayList<Paperboy.NewsArticle> articles) {
-        try {
-            var parser = new Json.Parser();
-            parser.load_from_data(json_content);
-            var root = parser.get_root();
-            
-            if (root.get_node_type() == Json.NodeType.ARRAY) {
-                var array = root.get_array();
-                foreach (var element in array.get_elements()) {
-                    parse_fox_json_article(element.get_object(), articles);
-                }
-            } else if (root.get_node_type() == Json.NodeType.OBJECT) {
-                parse_fox_json_article(root.get_object(), articles);
-            }
-        } catch (GLib.Error e) {
-            // JSON parsing failed, ignore
-        }
-    }
-
-    private static void parse_fox_json_article(Json.Object obj, Gee.ArrayList<Paperboy.NewsArticle> articles) {
-    if (obj.has_member("@type") && obj.get_string_member("@type") == "NewsArticle") {
-            if (obj.has_member("headline") && obj.has_member("url")) {
-                string title = obj.get_string_member("headline");
-                string url = obj.get_string_member("url");
-                
-                if (title.length > 10 && !is_duplicate_url(articles, url)) {
-                    var article = new Paperboy.NewsArticle();
-                    article.title = title;
-                    article.url = url;
-                    
-                    // Try to get image from JSON-LD
-                    if (obj.has_member("image")) {
-                        var image_node = obj.get_member("image");
-                        if (image_node.get_node_type() == Json.NodeType.OBJECT) {
-                            var image_obj = image_node.get_object();
-                            if (image_obj.has_member("url")) {
-                                article.image_url = image_obj.get_string_member("url");
-                            }
-                        } else if (image_node.get_node_type() == Json.NodeType.ARRAY) {
-                            var image_array = image_node.get_array();
-                            if (image_array.get_length() > 0) {
-                                var first_image = image_array.get_element(0);
-                                if (first_image.get_node_type() == Json.NodeType.OBJECT) {
-                                    var img_obj = first_image.get_object();
-                                    if (img_obj.has_member("url")) {
-                                        article.image_url = img_obj.get_string_member("url");
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    
-                    articles.add(article);
-                }
-            }
-        }
-    }
-
     private static bool is_duplicate_url(Gee.ArrayList<Paperboy.NewsArticle> articles, string url) {
         foreach (var article in articles) {
             if (article.url == url) {
@@ -899,23 +780,22 @@ public class NewsSources {
         return false;
     }
 
-
     private static void fetch_fox_article_images(
     Gee.ArrayList<Paperboy.NewsArticle> articles,
         Soup.Session session,
         AddItemFunc add_item,
         string current_category
     ) {
-        // Fetch images for articles that don't have them yet, but limit to first
-        // few articles to reduce overall load latency. Call the per-article
-        // fetcher directly since it spawns its own background thread.
+        // Fetch OG images for articles that don't have them yet, limited to a few
+        // to avoid long-running work. Delegate to Tools.ImageParser.fetch_open_graph_image
+        // which spawns its own background thread and updates the UI via add_item.
         int count = 0;
-        // OG image fetching for missing images is handled elsewhere; do not call extract_article_images_from_html here.
         foreach (var article in articles) {
-            if (article.image_url == null && count < 6) {
-                // Placeholder for future OG image fetch logic if needed
+            if (article.image_url == null && count < 6 && article.url != null) {
+                Tools.ImageParser.fetch_open_graph_image(article.url, session, add_item, current_category);
                 count++;
             }
+            if (count >= 6) break;
         }
     }
 
@@ -935,71 +815,14 @@ public class NewsSources {
             var article = results.get_element(i).get_object();
             if (article.has_member("webUrl")) {
                 string url = article.get_string_member("webUrl");
-                // fetch_guardian_article_image spawns its own thread, so call directly
-                fetch_guardian_article_image(url, session, add_item, current_category);
+                // Delegate OG image fetching to Tools.ImageParser
+                Tools.ImageParser.fetch_open_graph_image(url, session, add_item, current_category);
                 count++;
             }
         }
     }
 
-    private static void fetch_guardian_article_image(
-        string article_url,
-        Soup.Session session,
-        AddItemFunc add_item,
-        string current_category
-    ) {
-        new Thread<void*>("fetch-guardian-image", () => {
-            try {
-                var msg = new Soup.Message("GET", article_url);
-                msg.request_headers.append("User-Agent", "Mozilla/5.0 (Linux; rv:91.0) Gecko/20100101 Firefox/91.0");
-                session.send_message(msg);
 
-                if (msg.status_code == 200) {
-                    string body = (string) msg.response_body.flatten().data;
-                    // Look for Open Graph image meta tag
-                    var og_regex = /<meta[^>]*property="og:image"[^>]*content="([^"]+)"/;
-                    MatchInfo match_info;
-                    if (og_regex.match(body, 0, out match_info)) {
-                        string image_url = match_info.fetch(1);
-                        // Guardian OG image discovered; update UI silently
-                        // Update UI by calling add_item with image_url - title/url unknown here, so call add_item with empty title
-                        // Instead, try to extract the headline to pass through
-                        string title = "";
-                        var title_regex = /<meta[^>]*property="og:title"[^>]*content="([^"]+)"/;
-                        MatchInfo t_info;
-                        if (title_regex.match(body, 0, out t_info)) {
-                            title = t_info.fetch(1);
-                        }
-                        if (title.length == 0) {
-                            // Try h1
-                            var h1_regex = /<h1[^>]*>([^<]+)<\/h1>/;
-                            MatchInfo h1_info;
-                            if (h1_regex.match(body, 0, out h1_info)) {
-                                title = strip_html(h1_info.fetch(1)).strip();
-                            }
-                        }
-                        if (title.length == 0) title = article_url; // fallback
-
-                        Idle.add(() => {
-                            add_item(title, article_url, image_url, current_category);
-                            return false;
-                        });
-                    }
-                }
-            } catch (GLib.Error e) {
-                // ignore
-            }
-            return null;
-        });
-    }
-
-
-        /* Wall Street Journal scraper: attempt to extract recent articles and images
-        * We intentionally keep this conservative: try JSON-LD first (structured data),
-        * fall back to article/anchor heuristics, and then attempt to fetch images
-        * from individual article pages for missing thumbnails. WSJ is often
-        * paywalled; this scraper will simply skip articles that are inaccessible.
-        */
     private static void fetch_wsj(
         string current_category,
         string current_search_query,
@@ -1008,50 +831,39 @@ public class NewsSources {
         ClearItemsFunc clear_items,
         AddItemFunc add_item
     ) {
-        // Always use Google News RSS to discover WSJ articles for any category
-        // Use Google News RSS to discover WSJ articles for any category
-        // After RSS fetch, try to fetch homepage images and match to articles
-        RssParser.fetch_rss_url(
-            "https://news.google.com/rss/search?q=" + Uri.escape_string("site:wsj.com" + (current_search_query.length > 0 ? " " + current_search_query : "")) + "&hl=en-US&gl=US&ceid=US:en",
-            "Wall Street Journal",
-            category_display_name(current_category),
-            current_category,
-            current_search_query,
-            session,
-            set_label,
-            clear_items,
-            add_item
-        );
-
-        // Optionally, fetch homepage images and match to articles (requires article list)
-        // This step can be added after RSS parsing if you refactor RssParser to expose the article list.
-    }
-
-    private static void fetch_wsj_article_images(
-    Gee.ArrayList<Paperboy.NewsArticle> articles,
-        Soup.Session session,
-        AddItemFunc add_item,
-        string current_category
-    ) {
-        int count = 0;
-        foreach (var article in articles) {
-            if (article.image_url == null && count < 6) {
-                fetch_wsj_article_image(article, session, add_item, current_category);
-                count++;
-            }
+        if (current_search_query.length > 0) {
+            fetch_google_domain(current_category, current_search_query, session, set_label, clear_items, add_item, "wsj.com", "WSJ");
+            return;
         }
+        string url = "https://feeds.content.dowjones.io/public/rss/RSSWorldNews.xml";
+        switch (current_category) {
+            case "technology":
+                url = "https://feeds.content.dowjones.io/public/rss/RSSWSJD";
+                break;
+            case "sports":
+                url = "https://feeds.content.dowjones.io/public/rss/rsssportsfeed";
+                break;
+            case "health":
+                url = "https://feeds.content.dowjones.io/public/rss/socialhealth";
+                break;
+            case "us":
+                url = "https://feeds.content.dowjones.io/public/rss/RSSUSnews";
+                break;
+            case "politics":
+                url = "https://feeds.content.dowjones.io/public/rss/socialpoliticsfeed";
+                break;
+            case "entertainment":
+                url = "https://feeds.content.dowjones.io/public/rss/RSSArtsCulture";
+                break;
+            case "lifestyle":
+                url = "https://feeds.content.dowjones.io/public/rss/RSSLifestyle";
+                break;
+            default:
+                url = "https://feeds.content.dowjones.io/public/rss/RSSWorldNews";
+                break;
+        }
+        RssParser.fetch_rss_url(url, "WSJ", category_display_name(current_category), current_category, current_search_query, session, set_label, clear_items, add_item);
     }
-
-    private static void fetch_wsj_article_image(
-    Paperboy.NewsArticle article,
-        Soup.Session session,
-        AddItemFunc add_item,
-        string current_category
-    ) {
-        // Function removed as requested; no longer calls extract_first_image_url_from_html
-    }
-
-
 
 
 }

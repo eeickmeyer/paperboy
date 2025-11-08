@@ -83,28 +83,46 @@ public class RssParser {
                                             a2 = a2->next;
                                         }
                                     } else if (c->name == "content" && c->ns != null && c->ns->prefix == "media") {
+                                        // media:content may provide url, type and medium attributes. Some feeds
+                                        // (like WSJ) use image URLs without a file extension (eg. /im-12345).
+                                        // Accept those when the type or medium indicates an image.
                                         Xml.Attr* a3 = c->properties;
+                                        string? media_url = null;
+                                        string? media_type = null;
+                                        string? media_medium = null;
                                         while (a3 != null) {
-                                            if (a3->name == "url" && thumb == null) {
-                                                string? media_url = a3->children != null ? (string) a3->children->content : null;
-                                                if (media_url != null && (media_url.has_suffix(".jpg") || media_url.has_suffix(".png") || media_url.has_suffix(".jpeg") || media_url.has_suffix(".webp"))) {
-                                                    thumb = media_url;
-                                                }
-                                                break;
+                                            if (a3->name == "url") {
+                                                media_url = a3->children != null ? (string) a3->children->content : null;
+                                            } else if (a3->name == "type") {
+                                                media_type = a3->children != null ? (string) a3->children->content : null;
+                                            } else if (a3->name == "medium") {
+                                                media_medium = a3->children != null ? (string) a3->children->content : null;
                                             }
                                             a3 = a3->next;
+                                        }
+                                        if (media_url != null && thumb == null) {
+                                            bool is_image = false;
+                                            if (media_type != null && media_type.has_prefix("image")) is_image = true;
+                                            if (media_medium != null && media_medium == "image") is_image = true;
+                                            string mu_lower = media_url.down();
+                                            if (mu_lower.has_suffix(".jpg") || mu_lower.has_suffix(".jpeg") || mu_lower.has_suffix(".png") || mu_lower.has_suffix(".webp") || mu_lower.has_suffix(".gif")) is_image = true;
+                                            // Heuristic: WSJ image host uses /im-... paths without extensions
+                                            if (!is_image && media_url.contains("images.wsj.net/im-")) is_image = true;
+                                            if (is_image) {
+                                                thumb = media_url.has_prefix("//") ? "https:" + media_url : media_url;
+                                            }
                                         }
                                     } else if (c->name == "description" && thumb == null) {
                                         // Sometimes images are in the description as HTML
                                         string? desc = c->get_content();
                                         if (desc != null) {
-                                            thumb = extract_image_from_html_snippet(desc);
+                                            thumb = Tools.ImageParser.extract_image_from_html_snippet(desc);
                                         }
                                     } else if (c->name == "encoded" && c->ns != null && c->ns->prefix == "content" && thumb == null) {
                                         // Check content:encoded for images (used by NPR and others)
                                         string? content = c->get_content();
                                         if (content != null) {
-                                            thumb = extract_image_from_html_snippet(content);
+                                            thumb = Tools.ImageParser.extract_image_from_html_snippet(content);
                                         }
                                     }
                                 }
@@ -168,82 +186,5 @@ public class RssParser {
         });
     }
 
-    // Extract image URL from HTML snippet (like RSS description or content:encoded)
-    public static string? extract_image_from_html_snippet(string html_snippet) {
-        // Look for img tags in the snippet
-        int search_pos = 0;
-        
-        while (search_pos < html_snippet.length) {
-            int img_pos = html_snippet.index_of("<img", search_pos);
-            if (img_pos == -1) break;
-            
-            int src_start = html_snippet.index_of("src=\"", img_pos);
-            if (src_start == -1) {
-                src_start = html_snippet.index_of("src='", img_pos);
-                if (src_start != -1) src_start += 5;
-            } else {
-                src_start += 5;
-            }
-            
-            if (src_start != -1) {
-                int src_end = html_snippet.index_of("\"", src_start);
-                if (src_end == -1) {
-                    src_end = html_snippet.index_of("'", src_start);
-                }
-                
-                if (src_end != -1) {
-                    string img_url = html_snippet.substring(src_start, src_end - src_start);
-                    
-                    // Decode HTML entities in the URL
-                    img_url = img_url.replace("&amp;", "&");
-                    img_url = img_url.replace("&lt;", "<");
-                    img_url = img_url.replace("&gt;", ">");
-                    img_url = img_url.replace("&quot;", "\"");
-                    
-                    // Basic URL decoding for NPR-style URLs
-                    img_url = img_url.replace("%3A", ":");
-                    img_url = img_url.replace("%2F", "/");
-                    img_url = img_url.replace("%3F", "?");
-                    img_url = img_url.replace("%3D", "=");
-                    img_url = img_url.replace("%26", "&");
-                    
-                    // Check if this is a NPR-style resizing URL with nested image URL
-                    if (img_url.contains("?url=http")) {
-                        int url_param_start = img_url.index_of("?url=") + 5;
-                        if (url_param_start > 4 && url_param_start < img_url.length) {
-                            string nested_url = img_url.substring(url_param_start);
-                            // If the nested URL looks like a proper image URL, use it instead
-                            if (nested_url.length > 30 && nested_url.has_prefix("http")) {
-                                img_url = nested_url;
-                            }
-                        }
-                    }
-                    
-                    string img_url_lower = img_url.down();
-                    
-                    // Enhanced filtering to skip unwanted images but allow more legitimate ones
-                    bool is_tracking_pixel = img_url_lower.contains("tracking") || 
-                                           img_url_lower.contains("pixel") ||
-                                           img_url_lower.contains("1x1") ||
-                                           img_url.length < 30;
-                    
-                    bool is_valid_image = img_url.length > 30 && 
-                        !img_url_lower.contains("icon") && 
-                        !img_url_lower.contains("logo") && 
-                        !is_tracking_pixel &&
-                        (img_url.has_prefix("http") || img_url.has_prefix("//")) &&
-                        (img_url_lower.contains("jpg") || img_url_lower.contains("jpeg") || 
-                         img_url_lower.contains("png") || img_url_lower.contains("webp") || 
-                         img_url_lower.contains("gif")); // Must be an actual image format
-                    
-                    if (is_valid_image) {
-                        return img_url.has_prefix("//") ? "https:" + img_url : img_url;
-                    }
-                }
-            }
-            
-            search_pos = img_pos + 4; // Move past this <img tag
-        }
-        return null;
-    }
+    
 }

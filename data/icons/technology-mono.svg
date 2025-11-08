@@ -1,10 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
-  <g fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-    <!-- Monitor screen -->
-    <rect x="4" y="5" width="16" height="10" rx="2" ry="2"/>
-    <!-- Stand neck -->
-    <path d="M12 15v3"/>
-    <!-- Stand base -->
-    <path d="M8 19h8"/>
-  </g>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="24px" height="24px" viewBox="0 0 24 24" version="1.1">
+<g id="surface1">
+<path style=" stroke:none;fill-rule:nonzero;fill:rgb(0%,0%,0%);fill-opacity:1;" d="M 1.5 2.25 C 1.085938 2.25 0.75 2.585938 0.75 3 L 0.75 18 C 0.75 18.414062 1.085938 18.75 1.5 18.75 L 22.5 18.75 C 22.914062 18.75 23.25 18.414062 23.25 18 L 23.25 3 C 23.25 2.585938 22.914062 2.25 22.5 2.25 Z M 12 15.75 C 12.414062 15.75 12.75 16.085938 12.75 16.5 C 12.75 16.914062 12.414062 17.25 12 17.25 C 11.585938 17.25 11.25 16.914062 11.25 16.5 C 11.25 16.085938 11.585938 15.75 12 15.75 Z M 11.25 19.5 L 11.25 20.25 L 8.925781 20.25 C 7.925781 20.304688 8 21.804688 9.003906 21.753906 L 15 21.753906 C 16 21.753906 16 20.25 15 20.25 L 12.75 20.25 L 12.75 19.5 Z M 11.25 19.5 "/>
+</g>
 </svg>
