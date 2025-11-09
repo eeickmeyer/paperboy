@@ -216,6 +216,7 @@ public class NewsSources {
     private static string category_display_name(string cat) {
         switch (cat) {
             case "all": return "All Categories";
+            case "myfeed": return "My Feed";
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
@@ -257,6 +258,32 @@ public class NewsSources {
             default:
                 return "News";
         }
+    }
+
+    // Return whether a given NewsSource can provide articles for the
+    // requested category. This is used by the UI when multiple sources are
+    // selected: if a category (e.g. "markets") is chosen that some sources
+    // don't support (Bloomberg-specific sections), we exclude those sources
+    // from the multi-source fetch so only compatible sources are queried.
+    public static bool supports_category(NewsSource source, string category) {
+        // Only Bloomberg needs special handling: it exposes a narrower set
+        // of dedicated sections. All other sources can be considered to
+        // support the common categories (and many use site-search fallbacks).
+        if (source == NewsSource.BLOOMBERG) {
+            switch (category) {
+                case "markets":
+                case "industries":
+                case "economics":
+                case "wealth":
+                case "green":
+                case "politics":
+                case "technology":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        return true;
     }
 
 
@@ -447,7 +474,6 @@ public class NewsSources {
                     } else {
                         set_label(@"$(category_name) — The Guardian");
                     }
-                    clear_items();
                     uint len = results.get_length();
                     for (uint i = 0; i < len; i++) {
                         var article = results.get_element(i).get_object();
@@ -557,7 +583,6 @@ public class NewsSources {
                     } else {
                         set_label(category_name);
                     }
-                    clear_items();
                     uint len = children.get_length();
                     for (uint i = 0; i < len; i++) {
                         var post = children.get_element(i).get_object();
@@ -751,7 +776,6 @@ public class NewsSources {
                 if (current_search_query.length > 0) {
                     Idle.add(() => {
                         set_label(@"No Fox News results for search: \"$(current_search_query)\"");
-                        clear_items();
                         return false;
                     });
                     return null;
@@ -766,7 +790,6 @@ public class NewsSources {
                     } else {
                         set_label(category_name);
                     }
-                    clear_items();
                     int ui_limit = 16;
                     int ui_count = 0;
                     int total = articles.size;
@@ -784,11 +807,10 @@ public class NewsSources {
                 });
             } catch (GLib.Error e) {
                 warning("Error parsing Fox News HTML: %s", e.message);
-                Idle.add(() => {
-                    set_label("Fox News: Error loading articles");
-                    clear_items();
-                    return false;
-                });
+                    Idle.add(() => {
+                        set_label("Fox News: Error loading articles");
+                        return false;
+                    });
             }
             return null;
         });

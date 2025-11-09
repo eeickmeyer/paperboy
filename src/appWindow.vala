@@ -73,6 +73,7 @@ public class NewsWindow : Adw.ApplicationWindow {
     private uint featured_carousel_timeout_id = 0;
     private string? featured_carousel_category = null;
     private Gee.ArrayList<Gtk.Label> featured_carousel_dot_widgets;
+    private Gee.ArrayList<Gtk.Widget> featured_carousel_widgets;
     // Hero container reference for responsive sizing
     private Gtk.Box hero_container;
     // Main content container that holds both hero and columns
@@ -183,23 +184,39 @@ public class NewsWindow : Adw.ApplicationWindow {
     // Move carousel to the next slide
     private void carousel_next() {
         if (featured_carousel_stack == null) return;
-        int total = featured_carousel_items != null ? featured_carousel_items.size : 0;
+        int total = featured_carousel_widgets != null ? featured_carousel_widgets.size : 0;
         if (total <= 1) return;
+        // Advance index and select next widget that is actually in the stack
         featured_carousel_index = (featured_carousel_index + 1) % total;
-        string name = "%d".printf(featured_carousel_index);
-        featured_carousel_stack.set_visible_child_name(name);
-        update_carousel_dots(featured_carousel_index);
+        for (int i = 0; i < total; i++) {
+            var child = featured_carousel_widgets.get(featured_carousel_index) as Gtk.Widget;
+            if (child != null && child.get_parent() == featured_carousel_stack) {
+                featured_carousel_stack.set_visible_child(child);
+                update_carousel_dots(featured_carousel_index);
+                return;
+            }
+            featured_carousel_index = (featured_carousel_index + 1) % total;
+        }
+        append_debug_log("carousel_next: no valid child found for stack");
     }
 
     // Move carousel to the previous slide
     private void carousel_prev() {
         if (featured_carousel_stack == null) return;
-        int total = featured_carousel_items != null ? featured_carousel_items.size : 0;
+        int total = featured_carousel_widgets != null ? featured_carousel_widgets.size : 0;
         if (total <= 1) return;
+        // Move backwards and pick a valid widget actually present in the stack
         featured_carousel_index = (featured_carousel_index - 1 + total) % total;
-        string name = "%d".printf(featured_carousel_index);
-        featured_carousel_stack.set_visible_child_name(name);
-        update_carousel_dots(featured_carousel_index);
+        for (int i = 0; i < total; i++) {
+            var child = featured_carousel_widgets.get(featured_carousel_index) as Gtk.Widget;
+            if (child != null && child.get_parent() == featured_carousel_stack) {
+                featured_carousel_stack.set_visible_child(child);
+                update_carousel_dots(featured_carousel_index);
+                return;
+            }
+            featured_carousel_index = (featured_carousel_index - 1 + total) % total;
+        }
+        append_debug_log("carousel_prev: no valid child found for stack");
     }
     
     // Remaining articles after hitting the Load More limit
@@ -224,6 +241,11 @@ public class NewsWindow : Adw.ApplicationWindow {
     // Loading spinner for initial content load
     private Gtk.Spinner? loading_spinner = null;
     private Gtk.Box? loading_container = null;
+    // Message box shown in main content when personalized feed is disabled
+    private Gtk.Box? personalized_message_box = null;
+    // Label and action button inside the personalized message overlay
+    private Gtk.Label? personalized_message_label = null;
+    private Gtk.Button? personalized_message_action = null;
     // Initial-load gating: wait for hero (or timeout) before revealing main content
     private bool initial_phase = false;
     private bool hero_image_loaded = false;
@@ -233,6 +255,33 @@ public class NewsWindow : Adw.ApplicationWindow {
     private int pending_images = 0;
     private bool initial_items_populated = false;
     private const int INITIAL_MAX_WAIT_MS = 5000; // maximum time to wait for images
+    // Debug log path (written when PAPERBOY_DEBUG is set)
+    private string debug_log_path = "/tmp/paperboy-debug.log";
+
+    private void append_debug_log(string line) {
+        try {
+            string path = debug_log_path;
+            string old = "";
+            try { GLib.FileUtils.get_contents(path, out old); } catch (GLib.Error e) { old = ""; }
+            string outc = old + line + "\n";
+            GLib.FileUtils.set_contents(path, outc);
+        } catch (GLib.Error e) {
+            // best-effort logging only
+        }
+    }
+
+    // Small helper to join a Gee.ArrayList<string> for debug output
+    private string array_join(Gee.ArrayList<string>? list) {
+        if (list == null) return "(null)";
+        string out = "";
+        try {
+            foreach (var s in list) {
+                if (out.length > 0) out += ",";
+                out += s;
+            }
+        } catch (GLib.Error e) { return "(error)"; }
+        return out;
+    }
 
     // Locate data files both in development tree (data/...) and installed locations
     private string? find_data_file(string relative) {
@@ -270,6 +319,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         string? filename = null;
         switch (cat) {
             case "all": filename = "all-mono.svg"; break;
+            case "myfeed": filename = "myfeed-mono.svg"; break;
             case "general": filename = "world-mono.svg"; break;
             case "markets": filename = "markets-mono.svg"; break;
             case "industries": filename = "industries-mono.svg"; break;
@@ -288,18 +338,39 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
 
         if (filename != null) {
-            var icon_path = find_data_file(GLib.Path.build_filename("icons", filename));
+            // Prefer pre-bundled symbolic mono icons (both black and white
+            // variants live in data/icons/symbolic/). Fall back to the
+            // original data/icons/ location for compatibility.
+            string[] candidates = {
+                GLib.Path.build_filename("icons", "symbolic", filename),
+                GLib.Path.build_filename("icons", filename)
+            };
+            string? icon_path = null;
+            foreach (var c in candidates) {
+                icon_path = find_data_file(c);
+                if (icon_path != null) break;
+            }
+
             if (icon_path != null) {
                 try {
-                    // If we're in dark mode and the icon has colors tuned for light
-                    // backgrounds, produce/get a white variant to improve contrast.
-                    string? maybe_white = null;
+                    // If we're in dark mode, prefer a bundled white variant
+                    // shipped alongside the symbolic icons: <name>-white.svg.
+                    string use_path = icon_path;
                     if (is_dark_mode()) {
-                        maybe_white = ensure_white_icon_for(icon_path);
+                        string alt_name;
+                        if (filename.has_suffix(".svg"))
+                            alt_name = filename.substring(0, filename.length - 4) + "-white.svg";
+                        else
+                            alt_name = filename + "-white.svg";
+
+                        string? white_candidate = null;
+                        // Check the symbolic folder first for the white asset
+                        white_candidate = find_data_file(GLib.Path.build_filename("icons", "symbolic", alt_name));
+                        if (white_candidate == null) white_candidate = find_data_file(GLib.Path.build_filename("icons", alt_name));
+                        if (white_candidate != null) use_path = white_candidate;
                     }
-                    var load_path = maybe_white != null ? maybe_white : icon_path;
-                    // Load the image directly from the data directory and size it
-                    var img = new Gtk.Image.from_file(load_path);
+
+                    var img = new Gtk.Image.from_file(use_path);
                     img.set_pixel_size(SIDEBAR_ICON_SIZE);
                     return img;
                 } catch (GLib.Error e) {
@@ -383,60 +454,209 @@ public class NewsWindow : Adw.ApplicationWindow {
         sidebar_icon_holders.set(cat, holder);
 
         row.activated.connect(() => {
+            // Debug: log sidebar activations when debug env var is set
+            try {
+                string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (_dbg != null && _dbg.length > 0) {
+                    append_debug_log("sidebar_activate: category=" + cat + " title=" + title);
+                }
+            } catch (GLib.Error e) { }
+            // Persist selection immediately and update UI selection synchronously
             prefs.category = cat;
+            try {
+                string? _dbg3 = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (_dbg3 != null && _dbg3.length > 0) append_debug_log("activation_set_prefs: prefs.category=" + prefs.category);
+            } catch (GLib.Error e) { }
             prefs.save_config();
-            fetch_news();
-            sidebar_list.select_row(row);
+            try { sidebar_list.select_row(row); } catch (GLib.Error e) { }
+
+            // Defer the fetch to the main loop to avoid re-entrant rebuilds
+            // that remove the row while the handler is still running. Set
+            // the preference again inside the Idle callback to avoid race
+            // conditions with other scheduled work that may overwrite it.
+            Idle.add(() => {
+                try {
+                    prefs.category = cat;
+                    prefs.save_config();
+                } catch (GLib.Error e) { }
+                // Debug: note that the deferred callback is running and what
+                // category we'll fetch for
+                try {
+                    string? _dbg2 = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                    if (_dbg2 != null && _dbg2.length > 0) append_debug_log("idle_fetch: scheduled_category=" + prefs.category);
+                } catch (GLib.Error e) { }
+                try { fetch_news(); } catch (GLib.Error e) { }
+                try { update_personalization_ui(); } catch (GLib.Error e) { }
+                return false;
+            });
         });
         sidebar_list.append(row);
+        // Debug: record row additions
+        try {
+            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+            if (_dbg != null && _dbg.length > 0) append_debug_log("sidebar_add_row: cat=" + cat + " title=" + title + " selected=" + (selected ? "yes" : "no"));
+        } catch (GLib.Error e) { }
         if (selected) sidebar_list.select_row(row);
     }
 
     // Rebuild the sidebar rows according to the currently selected source
     private void rebuild_sidebar_rows_for_source() {
+        // Debug: log sidebar rebuild and preferred sources for tracing
+        try {
+            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (_dbg != null && _dbg.length > 0) {
+                    string pref = array_join(prefs.preferred_sources);
+                    append_debug_log("rebuild_sidebar: preferred_sources=" + pref + " current_category=" + prefs.category);
+                }
+        } catch (GLib.Error e) { }
         // Clear existing rows
+        int removed = 0;
         Gtk.Widget? child = sidebar_list.get_first_child();
         while (child != null) {
             Gtk.Widget? next = child.get_next_sibling();
-            sidebar_list.remove(child);
+            try { sidebar_list.remove(child); } catch (GLib.Error e) { }
             child = next;
+            removed++;
         }
+        try {
+            string? _dbg2 = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+            if (_dbg2 != null && _dbg2.length > 0) append_debug_log("rebuild_sidebar: removed_rows=" + removed.to_string());
+        } catch (GLib.Error e) { }
 
-    // Categories header, then include the "All Categories" option under it
+    // Place "My Feed" above the Categories header, then include the "All Categories" option
+    sidebar_add_row("My Feed", "myfeed", prefs.category == "myfeed");
     sidebar_add_header("Categories");
     sidebar_add_row("All Categories", "all", prefs.category == "all");
 
-        if (prefs.news_source == NewsSource.BLOOMBERG) {
-            // Bloomberg-specific categories
-            sidebar_add_row("Markets", "markets", prefs.category == "markets");
-            sidebar_add_row("Industries", "industries", prefs.category == "industries");
-            sidebar_add_row("Economics", "economics", prefs.category == "economics");
-            sidebar_add_row("Wealth", "wealth", prefs.category == "wealth");
-            sidebar_add_row("Green", "green", prefs.category == "green");
-            // Keep technology for Bloomberg as well
-            sidebar_add_row("Technology", "technology", prefs.category == "technology");
-            // Also expose politics for completeness
-            sidebar_add_row("Politics", "politics", prefs.category == "politics");
-        } else {
-            // Default set used for most sources
-            sidebar_add_row("World News", "general", prefs.category == "general");
-            sidebar_add_row("US News", "us", prefs.category == "us");
-            sidebar_add_row("Technology", "technology", prefs.category == "technology");
-            sidebar_add_row("Science", "science", prefs.category == "science");
-            sidebar_add_row("Sports", "sports", prefs.category == "sports");
-            sidebar_add_row("Health", "health", prefs.category == "health");
-            sidebar_add_row("Entertainment", "entertainment", prefs.category == "entertainment");
-            sidebar_add_row("Politics", "politics", prefs.category == "politics");
-            sidebar_add_row("Lifestyle", "lifestyle", prefs.category == "lifestyle");
+    // If multiple preferred sources are selected, build the union of
+    // categories supported by those sources and show only those rows.
+    if (prefs.preferred_sources != null && prefs.preferred_sources.size > 1) {
+        var allowed = new Gee.HashMap<string, bool>();
+        // Default fallback categories most sources support
+        string[] default_cats = { "general", "us", "technology", "science", "sports", "health", "entertainment", "politics", "lifestyle" };
+        // Add defaults for any multi-source selection, then add source-specific ones
+        foreach (var c in default_cats) allowed.set(c, true);
+
+        foreach (var id in prefs.preferred_sources) {
+            switch (id) {
+                case "bloomberg": {
+                    allowed.set("markets", true);
+                    allowed.set("industries", true);
+                    allowed.set("economics", true);
+                    allowed.set("wealth", true);
+                    allowed.set("green", true);
+                    // Bloomberg also has technology & politics which are already allowed above
+                }
+                break;
+                case "guardian": {
+                    // Guardian covers the default set; no-op
+                }
+                break;
+                case "nytimes": {
+                    // NYT uses defaults but lacks a dedicated 'lifestyle' feed in some cases
+                }
+                break;
+                case "reddit": {
+                    // Reddit can supply most categories via subreddits
+                }
+                break;
+                case "wsj": {
+                    // WSJ supports world, tech, sports, health, etc.
+                }
+                break;
+                case "bbc": {
+                    // BBC supports the default set
+                }
+                break;
+                default: {
+                    // Unknown sources: assume defaults
+                }
+                break;
+            }
         }
+
+        // Display categories in a stable, prioritized order
+        string[] priority = { "general", "us", "technology", "science", "markets", "industries", "economics", "wealth", "green", "sports", "health", "entertainment", "politics", "lifestyle" };
+        foreach (var cat in priority) {
+            bool present = false;
+            // Gee.HashMap<bool> returns a bool for get; avoid comparing to null.
+            // Iterate entries to safely detect presence and truthiness.
+            foreach (var kv in allowed.entries) {
+                if (kv.key == cat) { present = kv.value; break; }
+            }
+            if (present) sidebar_add_row(category_display_name_for(cat), cat, prefs.category == cat);
+        }
+        return;
+    }
+
+    // Single-source path: show categories appropriate to the selected source
+    // Use the effective source (honour a single-item preferred_sources list)
+    NewsSource sidebar_eff = effective_news_source();
+    if (sidebar_eff == NewsSource.BLOOMBERG) {
+        // Bloomberg-specific categories
+        sidebar_add_row("Markets", "markets", prefs.category == "markets");
+        sidebar_add_row("Industries", "industries", prefs.category == "industries");
+        sidebar_add_row("Economics", "economics", prefs.category == "economics");
+        sidebar_add_row("Wealth", "wealth", prefs.category == "wealth");
+        sidebar_add_row("Green", "green", prefs.category == "green");
+        // Keep technology for Bloomberg as well
+        sidebar_add_row("Technology", "technology", prefs.category == "technology");
+        // Also expose politics for completeness
+        sidebar_add_row("Politics", "politics", prefs.category == "politics");
+    } else {
+        // Default set used for most sources
+        sidebar_add_row("World News", "general", prefs.category == "general");
+        sidebar_add_row("US News", "us", prefs.category == "us");
+        sidebar_add_row("Technology", "technology", prefs.category == "technology");
+        sidebar_add_row("Science", "science", prefs.category == "science");
+        sidebar_add_row("Sports", "sports", prefs.category == "sports");
+        sidebar_add_row("Health", "health", prefs.category == "health");
+        sidebar_add_row("Entertainment", "entertainment", prefs.category == "entertainment");
+        sidebar_add_row("Politics", "politics", prefs.category == "politics");
+        sidebar_add_row("Lifestyle", "lifestyle", prefs.category == "lifestyle");
+    }
     }
 
     // Update the source logo and label based on current news source
     private void update_source_info() {
-        string source_name = "";
-        string? logo_file = null;
+        // If multiple preferred sources are selected, show a combined label
+        if (prefs.preferred_sources != null && prefs.preferred_sources.size > 1) {
+            source_label.set_text("Multiple Sources");
+            // Prefer the pre-bundled symbolic mono icons (symbolic/)
+            string? multi_icon = find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono.svg"));
+            if (multi_icon == null) multi_icon = find_data_file(GLib.Path.build_filename("icons", "multiple-mono.svg"));
+            if (multi_icon != null) {
+                try {
+                    string use_path = multi_icon;
+                    try {
+                        if (is_dark_mode()) {
+                            string? white_candidate = find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono-white.svg"));
+                            if (white_candidate == null) white_candidate = find_data_file(GLib.Path.build_filename("icons", "multiple-mono-white.svg"));
+                            if (white_candidate != null) use_path = white_candidate;
+                        }
+                    } catch (GLib.Error e) { }
+                    var pix = new Gdk.Pixbuf.from_file_at_size(use_path, 32, 32);
+                    if (pix != null) {
+                        var tex = Gdk.Texture.for_pixbuf(pix);
+                        source_logo.set_from_paintable(tex);
+                        return;
+                    }
+                } catch (GLib.Error e) { /* fall back to symbolic icon below */ }
+            }
+            try { source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error e) { }
+            return;
+        }
+
+    // Determine effective single source (if the user enabled exactly one
+    // preferred source, treat that as the active source). This lets the
+    // multi-select preferences influence the single-source UI when the
+    // user chooses exactly one source via the preferences dialog.
+    NewsSource eff = effective_news_source();
+
+    string source_name = "";
+    string? logo_file = null;
         
-        switch (prefs.news_source) {
+    switch (eff) {
             case NewsSource.GUARDIAN:
                 source_name = "The Guardian";
                 logo_file = "guardian-logo.png";
@@ -527,138 +747,36 @@ public class NewsWindow : Adw.ApplicationWindow {
         source_logo.set_from_icon_name("application-rss+xml-symbolic");
     }
 
+    // Return the NewsSource the UI should treat as "active". If the
+    // user has enabled exactly one preferred source, map that id to the
+    // corresponding enum; otherwise use the explicit prefs.news_source.
+    private NewsSource effective_news_source() {
+        if (prefs.preferred_sources != null && prefs.preferred_sources.size == 1) {
+            try {
+                string id = prefs.preferred_sources.get(0);
+                switch (id) {
+                    case "guardian": return NewsSource.GUARDIAN;
+                    case "reddit": return NewsSource.REDDIT;
+                    case "bbc": return NewsSource.BBC;
+                    case "nytimes": return NewsSource.NEW_YORK_TIMES;
+                    case "wsj": return NewsSource.WALL_STREET_JOURNAL;
+                    case "bloomberg": return NewsSource.BLOOMBERG;
+                    case "reuters": return NewsSource.REUTERS;
+                    case "npr": return NewsSource.NPR;
+                    case "fox": return NewsSource.FOX;
+                    default: return prefs.news_source;
+                }
+            } catch (GLib.Error e) {
+                return prefs.news_source;
+            }
+        }
+        return prefs.news_source;
+    }
+
     // Determine if the system is currently using dark mode
     private bool is_dark_mode() {
         var sm = Adw.StyleManager.get_default();
         return sm != null ? sm.dark : false;
-    }
-
-    // Ensure a white-variant SVG exists for the given custom icon and return its path, else null
-    private string? ensure_white_icon_for(string original_path) {
-        try {
-            // Write white variants to user data dir to avoid modifying install tree
-            var user_data = GLib.Environment.get_user_data_dir();
-            if (user_data == null || user_data.length == 0) return null;
-            var out_dir = GLib.Path.build_filename(user_data, "paperboy", "icons");
-            GLib.DirUtils.create_with_parents(out_dir, 0755);
-
-            var basename = GLib.Path.get_basename(original_path);
-            // Build output name: append -white before .svg if present
-            string out_name;
-            if (basename.has_suffix(".svg")) {
-                out_name = basename.substring(0, basename.length - 4) + "-white.svg";
-            } else {
-                out_name = basename + "-white.svg";
-            }
-            var out_path = GLib.Path.build_filename(out_dir, out_name);
-
-            // If already exists, return it
-            if (GLib.FileUtils.test(out_path, GLib.FileTest.EXISTS)) {
-                return out_path;
-            }
-
-            // Read original SVG
-            string svg;
-            GLib.FileUtils.get_contents(original_path, out svg);
-
-            // Best-effort recolor to white. We'll perform broader replacements so
-            // icons using various black/near-black values or inline styles are
-            // converted to white for dark mode.
-            string white = svg;
-
-            // 1) Replace explicit fill/stroke attributes unless they are 'none' or a URL reference
-            int pos = 0;
-            while ((pos = white.index_of("fill=\"", pos)) >= 0) {
-                int start = pos + 6; // after 'fill="'
-                int end = white.index_of("\"", start);
-                if (end < 0) break;
-                string val = white.substring(start, end - start);
-                string val_l = val.down().strip();
-                if (val_l != "none" && !val_l.has_prefix("url(")) {
-                    white = white.substring(0, start) + "#ffffff" + white.substring(end);
-                    pos = start + 7; // move past inserted value
-                } else {
-                    pos = end + 1;
-                }
-            }
-            pos = 0;
-            while ((pos = white.index_of("stroke=\"", pos)) >= 0) {
-                int start = pos + 8; // after 'stroke="'
-                int end = white.index_of("\"", start);
-                if (end < 0) break;
-                string val = white.substring(start, end - start);
-                string val_l = val.down().strip();
-                if (val_l != "none" && !val_l.has_prefix("url(")) {
-                    white = white.substring(0, start) + "#ffffff" + white.substring(end);
-                    pos = start + 7;
-                } else {
-                    pos = end + 1;
-                }
-            }
-
-            // 2) Replace occurrences inside style="..." attributes for fill and stroke
-            pos = 0;
-            while ((pos = white.index_of("style=\"", pos)) >= 0) {
-                int start = pos + 7;
-                int end = white.index_of("\"", start);
-                if (end < 0) break;
-                string style = white.substring(start, end - start);
-                string new_style = style;
-                // Replace fill:...; patterns
-                int s_pos = 0;
-                while ((s_pos = new_style.index_of("fill:", s_pos)) >= 0) {
-                    int vstart = s_pos + 5;
-                    int vend = new_style.index_of(";", vstart);
-                    if (vend < 0) vend = new_style.length;
-                    string v = new_style.substring(vstart, vend - vstart).strip();
-                    if (v.down() != "none" && !v.has_prefix("url(")) {
-                        new_style = new_style.substring(0, vstart) + "#ffffff" + new_style.substring(vend);
-                        s_pos = vstart + 7;
-                    } else {
-                        s_pos = vend + 1;
-                    }
-                }
-                // Replace stroke:...; patterns
-                s_pos = 0;
-                while ((s_pos = new_style.index_of("stroke:", s_pos)) >= 0) {
-                    int vstart = s_pos + 7;
-                    int vend = new_style.index_of(";", vstart);
-                    if (vend < 0) vend = new_style.length;
-                    string v = new_style.substring(vstart, vend - vstart).strip();
-                    if (v.down() != "none" && !v.has_prefix("url(")) {
-                        new_style = new_style.substring(0, vstart) + "#ffffff" + new_style.substring(vend);
-                        s_pos = vstart + 7;
-                    } else {
-                        s_pos = vend + 1;
-                    }
-                }
-                // Replace the full style attribute
-                white = white.substring(0, start) + new_style + white.substring(end);
-                pos = start + new_style.length + 1;
-            }
-
-            // 3) If the icon uses currentColor, set the root color to white
-            if (white.index_of("currentColor") >= 0) {
-                int idx = white.index_of("<svg");
-                if (idx >= 0) {
-                    int end = white.index_of(">", idx);
-                    if (end > idx) {
-                        var head = white.substring(0, end);
-                        var tail = white.substring(end);
-                        if (head.index_of(" color=") < 0) {
-                            head += " color=\"#ffffff\"";
-                            white = head + tail;
-                        }
-                    }
-                }
-            }
-
-            GLib.FileUtils.set_contents(out_path, white);
-            return out_path;
-        } catch (GLib.Error e) {
-            // On failure, fall back to original
-            return null;
-        }
     }
 
     public NewsWindow(Adw.Application app) {
@@ -778,9 +896,10 @@ public class NewsWindow : Adw.ApplicationWindow {
         header.pack_end(refresh_btn);
         
         // Add hamburger menu
-        var menu = new Menu();
-        menu.append("Change News Source", "app.change-source");
-        menu.append("About Paperboy", "app.about");
+    var menu = new Menu();
+    menu.append("Preferences", "app.change-source");
+    menu.append("Set User Location", "app.set-location");
+    menu.append("About Paperboy", "app.about");
         
         var menu_button = new Gtk.MenuButton();
         menu_button.set_icon_name("open-menu-symbolic");
@@ -794,7 +913,8 @@ public class NewsWindow : Adw.ApplicationWindow {
     sidebar_list.set_selection_mode(SelectionMode.SINGLE);
     sidebar_list.set_activate_on_single_click(true);
 
-    // Populate sidebar using helper methods: show header first, then "All Categories"
+    // Place "My Feed" above the Categories header, then include the "All Categories" option
+    sidebar_add_row("My Feed", "myfeed", prefs.category == "myfeed");
     sidebar_add_header("Categories");
     sidebar_add_row("All Categories", "all", prefs.category == "all");
         // Default site categories (will be rebuilt for sources like Bloomberg)
@@ -946,20 +1066,82 @@ public class NewsWindow : Adw.ApplicationWindow {
         
         // Add loading spinner as overlay on top of main content area
         main_overlay.add_overlay(loading_container);
-        content_box.append(main_overlay);
+
+    // Personalized feed disabled message (centered). This overlays the
+    // main content area and is visible only when the personalized feed
+    // option is turned off.
+    personalized_message_box = new Gtk.Box(Gtk.Orientation.VERTICAL, 8);
+    // Fill the available main content area so we can center contents inside it
+    personalized_message_box.set_halign(Gtk.Align.FILL);
+    personalized_message_box.set_valign(Gtk.Align.FILL);
+    personalized_message_box.set_hexpand(true);
+    personalized_message_box.set_vexpand(true);
+
+    // Inner full-size container that centers its child both horizontally
+    // and vertically. This ensures the label is dead-center regardless of
+    // how the overlay or parent containers allocate space.
+    var inner_center = new Gtk.Box(Gtk.Orientation.VERTICAL, 0);
+    inner_center.set_hexpand(true);
+    inner_center.set_vexpand(true);
+    inner_center.set_halign(Gtk.Align.CENTER);
+    inner_center.set_valign(Gtk.Align.CENTER);
+
+    // Create a reusable label that we'll update depending on state
+    personalized_message_label = new Gtk.Label("");
+    personalized_message_label.add_css_class("dim-label");
+    personalized_message_label.add_css_class("title-4");
+    personalized_message_label.set_halign(Gtk.Align.CENTER);
+    personalized_message_label.set_valign(Gtk.Align.CENTER);
+    // Center-justify and allow wrapping so multi-line instructions are centered
+    try { personalized_message_label.set_justify(Gtk.Justification.CENTER); } catch (GLib.Error e) { }
+    try { personalized_message_label.set_xalign(0.5f); } catch (GLib.Error e) { }
+    try { personalized_message_label.set_wrap(true); } catch (GLib.Error e) { }
+    try { personalized_message_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR); } catch (GLib.Error e) { }
+    inner_center.append(personalized_message_label);
+
+    // Action button to open the preferences dialog when helpful
+    personalized_message_action = new Gtk.Button.with_label("Open Preferences");
+    personalized_message_action.set_halign(Gtk.Align.CENTER);
+    personalized_message_action.set_valign(Gtk.Align.CENTER);
+    personalized_message_action.set_margin_top(8);
+    // Connect to preferences dialog (open the sources/settings dialog)
+    personalized_message_action.clicked.connect(() => {
+        try {
+            PrefsDialog.show_source_dialog(this);
+        } catch (GLib.Error e) { }
+    });
+    // Start hidden; we'll show it only when appropriate
+    personalized_message_action.set_visible(false);
+    inner_center.append(personalized_message_action);
+
+    personalized_message_box.append(inner_center);
+    // Do NOT add the personalized message to the inner main_overlay (it lives
+    // inside the scrolled content). We'll add it to a root overlay that wraps
+    // the navigation view so it can center over the visible viewport.
+    content_box.append(main_overlay);
         
         // Add content_box to content_area and set up proper containment
         content_area.append(content_box);
         scrolled.set_child(content_area);
 
-        // Split view: sidebar + content with collapsible sidebar
-        split_view = new Adw.OverlaySplitView();
-        split_view.set_sidebar(sidebar_scrolled);
-        // Wrap content in a NavigationView so we can slide in a preview page
-        nav_view = new Adw.NavigationView();
-        var main_page = new Adw.NavigationPage(scrolled, "Main");
-        nav_view.push(main_page);
-        split_view.set_content(nav_view);
+    // Split view: sidebar + content with collapsible sidebar
+    split_view = new Adw.OverlaySplitView();
+    split_view.set_sidebar(sidebar_scrolled);
+    // Wrap content in a NavigationView so we can slide in a preview page
+    nav_view = new Adw.NavigationView();
+    var main_page = new Adw.NavigationPage(scrolled, "Main");
+    nav_view.push(main_page);
+
+    // Create a root overlay that wraps the NavigationView so we can
+    // overlay the personalized-message box across the entire visible
+    // viewport (not just the inner scrolled content). This makes centering
+    // reliable regardless of scroll/content size.
+    var root_overlay = new Gtk.Overlay();
+    root_overlay.set_child(nav_view);
+    // Add the personalized message overlay on top of the root overlay
+    root_overlay.add_overlay(personalized_message_box);
+
+    split_view.set_content(root_overlay);
         split_view.set_show_sidebar(true);
 
         // Connect toggle after split view exists
@@ -1031,12 +1213,26 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Listen for theme changes to live-switch custom icons
         var sm = Adw.StyleManager.get_default();
         if (sm != null) {
-            sm.notify["dark"].connect(() => { update_sidebar_icons_for_theme(); });
+            // When the theme's dark property changes, update sidebar icons
+            // and the source/logo in the header so bundled mono icons
+            // (including the multi-source icon) can be swapped for their
+            // white variants or back to the original variant as appropriate.
+            sm.notify["dark"].connect(() => {
+                try {
+                    update_sidebar_icons_for_theme();
+                    // Update the top-right source logo to pick the correct
+                    // white or normal variant based on the new theme.
+                    try { update_source_info(); } catch (GLib.Error e) { }
+                } catch (GLib.Error e) { }
+            });
         }
 
         // initial state and fetch
         update_sidebar_for_source();
         fetch_news();
+
+    // Ensure the personalized message visibility is correct at startup
+    update_personalization_ui();
 
         // Clear on-disk cache when the window is closed to avoid disk clutter.
         // This is best-effort and will not prevent the window from closing.
@@ -1054,6 +1250,61 @@ public class NewsWindow : Adw.ApplicationWindow {
             if (nav_view != null) nav_view.pop();
             back_btn.set_visible(false);
         }
+    }
+
+    // Public helper to update personalized-feed UI state -- shows or hides
+    // the centered message overlay depending on the preference.
+    public void update_personalization_ui() {
+        if (personalized_message_box == null) return;
+        var prefs = NewsPreferences.get_instance();
+        bool enabled = prefs.personalized_feed_enabled;
+        bool is_myfeed = prefs.category == "myfeed";
+        // Determine if the user has chosen any personalized categories
+        bool has_personalized = prefs.personalized_categories != null && prefs.personalized_categories.size > 0;
+
+        // We show a centered overlay in two cases when the user has selected
+        // the "My Feed" category:
+        //  1) Personalization is disabled: instruct how to enable it.
+        //  2) Personalization is enabled but no categories were chosen: instruct
+        //     the user to open preferences and pick categories (provide a button).
+        bool show_message = false;
+        try {
+            if (is_myfeed) {
+                if (!enabled) {
+                    // Prompt to enable personalization (add actionable hint beneath)
+                    if (personalized_message_label != null) personalized_message_label.set_text("Enable this option in settings to get a personalized feed.");
+                    // Show the action button so users can jump straight to prefs
+                    if (personalized_message_action != null) personalized_message_action.set_visible(true);
+                    show_message = true;
+                } else if (enabled && !has_personalized) {
+                    // Personalization enabled but no categories selected
+                    if (personalized_message_label != null) personalized_message_label.set_text("Personalized Feed is enabled but no categories are selected. \nOpen Preferences → Personalized Feed and choose categories to enable My Feed.");
+                    if (personalized_message_action != null) personalized_message_action.set_visible(true);
+                    show_message = true;
+                } else {
+                    // Personalization enabled and categories selected -> show content
+                    show_message = false;
+                }
+            } else {
+                // For non-MyFeed categories, never show the personalized overlay
+                show_message = false;
+            }
+
+            personalized_message_box.set_visible(show_message);
+
+            if (main_content_container != null) {
+                // Show main content when we are not showing the overlay
+                main_content_container.set_visible(!show_message);
+            }
+        } catch (GLib.Error e) { }
+
+        // If the message is visible, hide the loading spinner; otherwise
+        // leave the spinner state alone (it may be controlled by fetch logic).
+        try {
+            if (loading_container != null && show_message) {
+                loading_container.set_visible(false);
+            }
+        } catch (GLib.Error e) { }
     }
 
     private bool source_has_categories(NewsSource s) {
@@ -1115,6 +1366,7 @@ public class NewsWindow : Adw.ApplicationWindow {
     private string category_display_name_for(string cat) {
         switch (cat) {
             case "all": return "All Categories";
+            case "myfeed": return "My Feed";
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
@@ -1152,6 +1404,14 @@ public class NewsWindow : Adw.ApplicationWindow {
         if (debug_enabled()) {
             warning("add_item called: current_view=%s article_cat=%s title=%s", prefs.category, category_id, title);
         }
+        // Persist debug trace to file when enabled so we can inspect logs even
+        // if the GUI detaches from the terminal.
+        try {
+            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+            if (_dbg != null && _dbg.length > 0) {
+                append_debug_log("add_item: view=" + prefs.category + " article_cat=" + category_id + " title=" + title);
+            }
+        } catch (GLib.Error e) { }
         // Do not hide the initial loading spinner here; we'll reveal content
         // once the hero image is ready or after a short timeout to avoid jarring.
         // If we already have a picture registered for this URL, treat this as an image update
@@ -1183,21 +1443,100 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
 
         // If the user has switched categories since this fetch began, ignore
-        // articles that don't belong to the current view, unless we're in
-        // "all" view which accepts everything.
+        // articles that don't belong to the current view. Treat the special
+        // "myfeed" view as a personalized union of categories when the
+        // personalized feed is enabled.
         string view_category = prefs.category;
-        if (view_category != "all" && view_category != category_id) {
-            // Drop stale article for a different category
-            if (debug_enabled()) warning("Dropping stale article for category %s (view=%s)", category_id, view_category);
-            return;
+        if (view_category == "myfeed") {
+            // If personalization is enabled, accept only articles that match
+            // one of the user's personalized categories (if any). If no
+            // personalized categories are selected, accept everything so the
+            // fallback fetches (which may request a default category) still
+            // populate the view.
+            if (prefs.personalized_feed_enabled) {
+                bool has_personalized = prefs.personalized_categories != null && prefs.personalized_categories.size > 0;
+                if (has_personalized) {
+                    bool match = false;
+                    foreach (var pc in prefs.personalized_categories) if (pc == category_id) { match = true; break; }
+                    if (!match) {
+                        if (debug_enabled()) warning("Dropping non-personalized article for My Feed: article_cat=%s title=%s", category_id, title);
+                        return;
+                    }
+                }
+                // else: no personalized categories selected -> accept all
+            } else {
+                // Personalized feed not enabled: don't populate My Feed
+                if (debug_enabled()) warning("Dropping article because My Feed personalization is disabled: article_cat=%s title=%s", category_id, title);
+                return;
+            }
+        } else {
+            if (view_category != "all" && view_category != category_id) {
+                // Drop stale article for a different category
+                if (debug_enabled()) warning("Dropping stale article for category %s (view=%s)", category_id, view_category);
+                return;
+            }
+        }
+
+        // Enforce that articles originate from the user's selected sources.
+        // Map the inferred source to the preference id strings and drop any
+        // articles that come from sources the user hasn't enabled. This
+        // protects against fetchers that may return cross-domain results.
+        if (prefs.preferred_sources != null && prefs.preferred_sources.size > 0) {
+            NewsSource article_src = infer_source_from_url(url);
+            string article_src_id = "";
+            switch (article_src) {
+                case NewsSource.GUARDIAN: article_src_id = "guardian"; break;
+                case NewsSource.REDDIT: article_src_id = "reddit"; break;
+                case NewsSource.BBC: article_src_id = "bbc"; break;
+                case NewsSource.NEW_YORK_TIMES: article_src_id = "nytimes"; break;
+                case NewsSource.WALL_STREET_JOURNAL: article_src_id = "wsj"; break;
+                case NewsSource.BLOOMBERG: article_src_id = "bloomberg"; break;
+                case NewsSource.REUTERS: article_src_id = "reuters"; break;
+                case NewsSource.NPR: article_src_id = "npr"; break;
+                case NewsSource.FOX: article_src_id = "fox"; break;
+                default: article_src_id = ""; break;
+            }
+
+            if (article_src_id.length > 0) {
+                bool allowed_src = false;
+                foreach (var ps in prefs.preferred_sources) {
+                    if (ps == article_src_id) { allowed_src = true; break; }
+                }
+                if (!allowed_src) {
+                    if (debug_enabled()) warning("Dropping article from unselected source %s title=%s", article_src_id, title);
+                    return;
+                }
+            }
+            // If we couldn't infer a source id, conservatively accept the article.
+        }
+
+        // If multiple preferred sources are selected and this article's
+        // category is one of Bloomberg's unique categories, only accept
+        // articles that actually originate from Bloomberg. This prevents
+        // other sources from supplying results into Bloomberg-only rows
+        // (e.g., markets, industries).
+        if (prefs.preferred_sources != null && prefs.preferred_sources.size > 1) {
+            string[] bloomberg_only = { "markets", "industries", "economics", "wealth", "green" };
+            bool is_bloomberg_cat = false;
+            foreach (var bc in bloomberg_only) if (bc == category_id) { is_bloomberg_cat = true; break; }
+            if (is_bloomberg_cat) {
+                NewsSource article_src = infer_source_from_url(url);
+                if (article_src != NewsSource.BLOOMBERG) {
+                    if (debug_enabled()) warning("Dropping non-Bloomberg article for Bloomberg-only category %s title=%s", category_id, title);
+                    return;
+                }
+            }
         }
         
         if (prefs.category == "all") {
-            // If the user selected "All Categories" but the active source is
-            // Bloomberg, only accept articles whose category is one of
-            // Bloomberg's available categories. This prevents showing
-            // unrelated categories that Bloomberg doesn't provide.
-            if (prefs.news_source == NewsSource.BLOOMBERG) {
+            // If the user selected "All Categories" but the EFFECTIVE single
+            // source is Bloomberg (i.e. single-source Bloomberg mode), only
+            // accept articles whose category is one of Bloomberg's available
+            // categories. When in multi-source mode we must NOT apply this
+            // restriction because the combined view should show the union
+            // of categories from all enabled sources.
+            NewsSource eff = effective_news_source();
+            if (eff == NewsSource.BLOOMBERG && (prefs.preferred_sources == null || prefs.preferred_sources.size <= 1)) {
                 string[] bloomberg_cats = { "markets", "industries", "economics", "wealth", "green", "politics", "technology" };
                 bool allowed = false;
                 foreach (string bc in bloomberg_cats) {
@@ -1206,7 +1545,7 @@ public class NewsWindow : Adw.ApplicationWindow {
                 if (!allowed) {
                     // Drop articles from categories Bloomberg doesn't have
                     if (debug_enabled()) {
-                        warning("Dropping article for Bloomber g: view=all source=Bloomberg article_cat=%s title=%s", category_id, title);
+                        warning("Dropping article for Bloomberg (single-source): view=all source=Bloomberg article_cat=%s title=%s", category_id, title);
                     }
                     return;
                 }
@@ -1398,6 +1737,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             hero_overlay.set_child(hero_image);
             var hero_chip = build_category_chip(category_id);
             hero_overlay.add_overlay(hero_chip);
+            // No source badge on hero cards (keep hero area clean)
 
             // Use reasonable defaults for placeholder and loading since hero will be responsive
             // Estimate hero width from current content width so we request an appropriately-sized image
@@ -1464,8 +1804,18 @@ public class NewsWindow : Adw.ApplicationWindow {
 
             // Initialize carousel state
             if (featured_carousel_items == null) featured_carousel_items = new Gee.ArrayList<ArticleItem>();
+            if (featured_carousel_widgets == null) featured_carousel_widgets = new Gee.ArrayList<Gtk.Widget>();
             featured_carousel_items.add(new ArticleItem(title, url, thumbnail_url, category_id));
             featured_carousel_category = category_id;
+
+            // Debug: log hero creation when debug env var is set (also write to file)
+            try {
+                string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (_dbg != null && _dbg.length > 0) {
+                    print("DEBUG: created hero for category=%s title=%s\n", category_id, title);
+                    append_debug_log("hero_created: category=" + category_id + " title=" + title);
+                }
+            } catch (GLib.Error e) { }
 
             // Create a stack to hold up to 5 slides
             featured_carousel_stack = new Gtk.Stack();
@@ -1475,6 +1825,7 @@ public class NewsWindow : Adw.ApplicationWindow {
 
             // Add the first slide (we'll add more slides as subsequent articles arrive)
             featured_carousel_stack.add_named(hero, "0");
+            featured_carousel_widgets.add(hero);
 
             // Wrap the stack and the dots in a single container so the dots
             // appear as part of the hero card itself.
@@ -1556,14 +1907,21 @@ public class NewsWindow : Adw.ApplicationWindow {
             }
             featured_carousel_timeout_id = Timeout.add_seconds(5, () => {
                 if (featured_carousel_stack == null) return false;
-                int total = featured_carousel_items != null ? featured_carousel_items.size : 0;
+                int total = featured_carousel_widgets != null ? featured_carousel_widgets.size : 0;
                 if (total <= 1) return true; // keep running until there are more slides
+                // Advance index and pick a child that is present in the stack
                 featured_carousel_index = (featured_carousel_index + 1) % total;
-                string name = "%d".printf(featured_carousel_index);
-                featured_carousel_stack.set_visible_child_name(name);
-                // Update dots in the visible slide
-                update_carousel_dots(featured_carousel_index);
-                return true; // continue timeout
+                for (int i = 0; i < total; i++) {
+                    var child = featured_carousel_widgets.get(featured_carousel_index) as Gtk.Widget;
+                    if (child != null && child.get_parent() == featured_carousel_stack) {
+                        featured_carousel_stack.set_visible_child(child);
+                        update_carousel_dots(featured_carousel_index);
+                        return true; // continue timeout
+                    }
+                    featured_carousel_index = (featured_carousel_index + 1) % total;
+                }
+                append_debug_log("carousel_timer: no valid child found for stack");
+                return true; // keep trying later
             });
 
             featured_used = true;
@@ -1575,9 +1933,42 @@ public class NewsWindow : Adw.ApplicationWindow {
         // If a featured carousel is active and we haven't reached 5 slides yet,
         // collect additional articles that match the featured category and add
         // them as slides to the carousel instead of rendering normal cards.
-        if (featured_carousel_stack != null && featured_carousel_items != null &&
-            featured_carousel_items.size < 5 && featured_carousel_category != null &&
-            featured_carousel_category == category_id) {
+            if (featured_carousel_stack != null && featured_carousel_items != null &&
+            featured_carousel_items.size < 5) {
+            // In "all" mode we only append slides that match the featured
+            // category (the carousel is seeded with a category). For
+            // specific-category views, prefer using the current view
+            // (`prefs.category`) as the authority since some fetchers may
+            // return slightly different category ids. This makes the
+            // carousel robust for non-"all" categories while preserving
+            // current behaviour for the mixed "all" view.
+            bool allow_slide = false;
+            if (prefs.category == "all") {
+                // In "all" mode, only append slides that match the seeded featured category
+                allow_slide = (featured_carousel_category != null && featured_carousel_category == category_id);
+            } else if (prefs.category == "myfeed" && prefs.personalized_feed_enabled) {
+                // In My Feed personalization mode, allow slides that either match the
+                // featured category or belong to one of the user's personalized categories.
+                if (featured_carousel_category != null && featured_carousel_category == category_id) {
+                    allow_slide = true;
+                } else {
+                    bool has_personalized = prefs.personalized_categories != null && prefs.personalized_categories.size > 0;
+                    if (!has_personalized) {
+                        // No personalized categories selected -> accept any category
+                        allow_slide = true;
+                    } else {
+                        foreach (var pc in prefs.personalized_categories) {
+                            if (pc == category_id) { allow_slide = true; break; }
+                        }
+                    }
+                }
+            } else {
+                // For specific single-category views, only allow slides that match the view
+                allow_slide = (category_id == prefs.category);
+            }
+            if (!allow_slide) {
+                return;
+            }
 
             // Build a slide similar to the hero we create above
             var slide = new Gtk.Box(Orientation.VERTICAL, 0);
@@ -1602,6 +1993,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             slide_overlay.set_child(slide_image);
             var slide_chip = build_category_chip(category_id);
             slide_overlay.add_overlay(slide_chip);
+            // No source badge on carousel slides to keep the hero area clean
 
             int default_w = estimate_content_width();
             int default_h = 250;
@@ -1642,7 +2034,17 @@ public class NewsWindow : Adw.ApplicationWindow {
             // Add slide to stack and to our item list
             int new_index = featured_carousel_items.size;
             featured_carousel_stack.add_named(slide, "%d".printf(new_index));
+            featured_carousel_widgets.add(slide);
             featured_carousel_items.add(new ArticleItem(title, url, thumbnail_url, category_id));
+
+            // Debug: log slide addition when debug env var is set (also write to file)
+            try {
+                string? _dbg2 = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (_dbg2 != null && _dbg2.length > 0) {
+                    print("DEBUG: added slide idx=%d category=%s title=%s\n", new_index, category_id, title);
+                    append_debug_log("slide_added: idx=" + new_index.to_string() + " category=" + category_id + " title=" + title);
+                }
+            } catch (GLib.Error e) { }
 
             // Ensure dots array exists and update their state
             if (featured_carousel_dot_widgets != null) update_carousel_dots(featured_carousel_index);
@@ -1698,6 +2100,10 @@ public class NewsWindow : Adw.ApplicationWindow {
         overlay.set_child(image);
         var chip = build_category_chip(category_id);
         overlay.add_overlay(chip);
+    // Add source badge to normal card
+    NewsSource card_src = infer_source_from_url(url);
+    var card_badge = build_source_badge(card_src);
+    overlay.add_overlay(card_badge);
 
         // Always set placeholder first
         set_placeholder_image(image, img_w, img_h);
@@ -2163,6 +2569,63 @@ public class NewsWindow : Adw.ApplicationWindow {
         return icon_path;
     }
 
+    // Infer source from a URL by checking known domain substrings. Falls back
+    // to the current prefs.news_source when uncertain.
+    private NewsSource infer_source_from_url(string? url) {
+        if (url == null || url.length == 0) return prefs.news_source;
+    string low = url.down();
+        if (low.index_of("guardian") >= 0 || low.index_of("theguardian") >= 0) return NewsSource.GUARDIAN;
+        if (low.index_of("bbc.co") >= 0 || low.index_of("bbc.") >= 0) return NewsSource.BBC;
+        if (low.index_of("reddit.com") >= 0 || low.index_of("redd.it") >= 0) return NewsSource.REDDIT;
+        if (low.index_of("nytimes") >= 0 || low.index_of("nyti.ms") >= 0) return NewsSource.NEW_YORK_TIMES;
+        if (low.index_of("wsj.com") >= 0 || low.index_of("dowjones") >= 0) return NewsSource.WALL_STREET_JOURNAL;
+        if (low.index_of("bloomberg") >= 0) return NewsSource.BLOOMBERG;
+        if (low.index_of("reuters") >= 0) return NewsSource.REUTERS;
+        if (low.index_of("npr.org") >= 0) return NewsSource.NPR;
+        if (low.index_of("foxnews") >= 0 || low.index_of("fox.com") >= 0) return NewsSource.FOX;
+        // Unknown, return preference as a sensible default
+        return prefs.news_source;
+    }
+
+    // Build a small source badge widget (icon + short name) to place in the
+    // top-right corner of cards and hero slides.
+    private Gtk.Widget build_source_badge(NewsSource source) {
+        var box = new Gtk.Box(Orientation.HORIZONTAL, 6);
+        box.add_css_class("source-badge");
+    // Position badge at the bottom-right of the overlay
+    box.set_margin_bottom(8);
+    box.set_margin_end(8);
+    box.set_valign(Gtk.Align.END);
+    box.set_halign(Gtk.Align.END);
+
+        // Try to load an icon image for the source
+        string? path = get_source_icon_path(source);
+        if (path != null) {
+            try {
+                var pix = new Gdk.Pixbuf.from_file_at_size(path, 20, 20);
+                if (pix != null) {
+                    var pic = new Gtk.Picture();
+                    var tex = Gdk.Texture.for_pixbuf(pix);
+                    pic.set_paintable(tex);
+                    pic.set_size_request(20, 20);
+                    box.append(pic);
+                }
+            } catch (GLib.Error e) {
+                // ignore and fall back to text
+            }
+        }
+
+        var lbl = new Gtk.Label(get_source_name(source));
+        lbl.add_css_class("source-badge-label");
+        lbl.set_valign(Gtk.Align.CENTER);
+    lbl.set_xalign(0.5f);
+        lbl.set_ellipsize(Pango.EllipsizeMode.END);
+        lbl.set_max_width_chars(12);
+        box.append(lbl);
+
+        return box;
+    }
+
     private void create_icon_placeholder(Gtk.Picture image, string icon_path, int width, int height) {
         try {
             var surface = new Cairo.ImageSurface(Cairo.Format.ARGB32, width, height);
@@ -2626,6 +3089,14 @@ public class NewsWindow : Adw.ApplicationWindow {
     }
 
     public void fetch_news() {
+        // Debug: log fetch_news invocation and current sequence
+        try {
+            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+            if (_dbg != null && _dbg.length > 0) {
+                append_debug_log("fetch_news: entering seq=" + fetch_sequence.to_string() + " category=" + prefs.category + " preferred_sources=" + array_join(prefs.preferred_sources));
+            }
+        } catch (GLib.Error e) { }
+
         // Ensure sidebar visibility reflects current source
         update_sidebar_for_source();
         // Clear featured hero and randomize columns count per fetch between 2 and 4 for extra variety
@@ -2646,6 +3117,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             featured_carousel_items.clear();
         }
         featured_carousel_stack = null;
+        if (featured_carousel_widgets != null) featured_carousel_widgets.clear();
         featured_carousel_dots_box = null;
         featured_carousel_index = 0;
         featured_carousel_category = null;
@@ -2702,8 +3174,13 @@ public class NewsWindow : Adw.ApplicationWindow {
         });
         
         // Bump fetch_sequence so callbacks from older fetches are ignored
+        uint before_seq = fetch_sequence;
         fetch_sequence += 1;
         uint my_seq = fetch_sequence;
+        try {
+            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+            if (_dbg != null && _dbg.length > 0) append_debug_log("fetch_news: bumped fetch_sequence " + before_seq.to_string() + " -> " + fetch_sequence.to_string());
+        } catch (GLib.Error e) { }
 
         // Capture a strong reference to `this` so the wrapped callbacks hold
         // the NewsWindow alive while they're queued. Without this the window
@@ -2723,7 +3200,10 @@ public class NewsWindow : Adw.ApplicationWindow {
 
         // Wrapped set_label: only update if this fetch is still current
     SetLabelFunc wrapped_set_label = (text) => {
-            if (my_seq != self_ref.fetch_sequence) return;
+            if (my_seq != self_ref.fetch_sequence) {
+                try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) append_debug_log("wrapped_set_label: ignoring stale seq=" + my_seq.to_string() + " current=" + self_ref.fetch_sequence.to_string()); } catch (GLib.Error e) { }
+                return;
+            }
             // Extract just the category part before the " — " separator
             string category_part = text;
             int separator_pos = text.index_of(" — ");
@@ -2735,7 +3215,10 @@ public class NewsWindow : Adw.ApplicationWindow {
 
         // Wrapped clear_items: only clear if this fetch is still current
         ClearItemsFunc wrapped_clear = () => {
-            if (my_seq != self_ref.fetch_sequence) return;
+                if (my_seq != self_ref.fetch_sequence) {
+                    try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) append_debug_log("wrapped_clear: ignoring stale seq=" + my_seq.to_string() + " current=" + self_ref.fetch_sequence.to_string()); } catch (GLib.Error e) { }
+                    return;
+                }
             // Clearing was already done above in fetch_news(), but some sources
             // call clear_items again from worker threads; guard to avoid
             // clearing content created by a newer fetch.
@@ -2774,19 +3257,198 @@ public class NewsWindow : Adw.ApplicationWindow {
 
         // Wrapped add_item: ignore items from stale fetches
     AddItemFunc wrapped_add = (title, url, thumbnail, category_id) => {
-            if (my_seq != self_ref.fetch_sequence) return;
+            if (my_seq != self_ref.fetch_sequence) {
+                try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) append_debug_log("wrapped_add: ignoring stale seq=" + my_seq.to_string() + " current=" + self_ref.fetch_sequence.to_string() + " article_cat=" + category_id); } catch (GLib.Error e) { }
+                return;
+            }
             self_ref.add_item(title, url, thumbnail, category_id);
         };
 
-        NewsSources.fetch(
-            prefs.news_source,
-            prefs.category,
-            current_search_query,
-            session,
-            wrapped_set_label,
-            wrapped_clear,
-            wrapped_add
-        );
+        // Support fetching from multiple preferred sources when the user
+        // has enabled more than one in preferences. The preferences store
+        // string ids (e.g. "guardian", "reddit"). Map those to the
+        // NewsSource enum and invoke NewsSources.fetch for each. Ensure
+        // we only clear the UI once (for the first fetch) so subsequent
+        // fetches append their results.
+        bool used_multi = false;
+        // Support personalized "My Feed" mode: when the user has selected
+        // the sidebar "My Feed" category and enabled personalization, we
+        // should fetch each personalized category separately and combine
+        // the results. Build the list of categories to request here.
+        bool is_myfeed_mode = (prefs.category == "myfeed" && prefs.personalized_feed_enabled);
+        string[] myfeed_cats = new string[0];
+        if (is_myfeed_mode) {
+            if (prefs.personalized_categories != null && prefs.personalized_categories.size > 0) {
+                myfeed_cats = new string[prefs.personalized_categories.size];
+                for (int i = 0; i < prefs.personalized_categories.size; i++) myfeed_cats[i] = prefs.personalized_categories.get(i);
+            } else {
+                // No personalized categories selected: fall back to a sane default
+                myfeed_cats = { "general" };
+            }
+        }
+        if (prefs.preferred_sources != null && prefs.preferred_sources.size > 1) {
+            // Display a combined label and bundled monochrome logo for multi-source mode
+            try {
+                self_ref.source_label.set_text("Multiple Sources");
+                // Try symbolic first (includes -white variants), then fall back
+                // to the old location for compatibility.
+                string? multi_icon = self_ref.find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono.svg"));
+                if (multi_icon == null) multi_icon = self_ref.find_data_file(GLib.Path.build_filename("icons", "multiple-mono.svg"));
+                if (multi_icon != null) {
+                    try {
+                        string use_path = multi_icon;
+                        try {
+                            if (self_ref.is_dark_mode()) {
+                                string? white_cand = self_ref.find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono-white.svg"));
+                                if (white_cand == null) white_cand = self_ref.find_data_file(GLib.Path.build_filename("icons", "multiple-mono-white.svg"));
+                                if (white_cand != null) use_path = white_cand;
+                            }
+                        } catch (GLib.Error e) { }
+                        var pix = new Gdk.Pixbuf.from_file_at_size(use_path, 32, 32);
+                        if (pix != null) {
+                            var tex = Gdk.Texture.for_pixbuf(pix);
+                            self_ref.source_logo.set_from_paintable(tex);
+                        } else {
+                            self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic");
+                        }
+                    } catch (GLib.Error e) {
+                        try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { }
+                    }
+                } else {
+                    try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error e) { }
+                }
+            } catch (GLib.Error e) { }
+            used_multi = true;
+
+            // Build list of NewsSource enums from preferred_sources strings
+            Gee.ArrayList<NewsSource> srcs = new Gee.ArrayList<NewsSource>();
+            foreach (var id in prefs.preferred_sources) {
+                switch (id) {
+                    case "guardian": srcs.add(NewsSource.GUARDIAN); break;
+                    case "reddit": srcs.add(NewsSource.REDDIT); break;
+                    case "bbc": srcs.add(NewsSource.BBC); break;
+                    case "nytimes": srcs.add(NewsSource.NEW_YORK_TIMES); break;
+                    case "wsj": srcs.add(NewsSource.WALL_STREET_JOURNAL); break;
+                    case "bloomberg": srcs.add(NewsSource.BLOOMBERG); break;
+                    case "reuters": srcs.add(NewsSource.REUTERS); break;
+                    case "npr": srcs.add(NewsSource.NPR); break;
+                    case "fox": srcs.add(NewsSource.FOX); break;
+                    default: /* ignore unknown ids */ break;
+                }
+            }
+
+            // If mapping failed or produced no sources, fall back to single source
+            if (srcs.size == 0) {
+                NewsSources.fetch(
+                    prefs.news_source,
+                    prefs.category,
+                    current_search_query,
+                    session,
+                    wrapped_set_label,
+                    wrapped_clear,
+                    wrapped_add
+                );
+            } else {
+                // Filter the selected sources to those that actually support
+                // the requested category. Special-case the personalized
+                // My Feed mode: prefs.category == "myfeed" is not a real
+                // provider category, so check per-personalized-category
+                // support (e.g., Bloomberg supports markets/industries but
+                // not a generic "myfeed"). This ensures Bloomberg isn't
+                // excluded from the combined fetch when the user has
+                // selected Bloomberg-specific personalized categories.
+                var filtered = new Gee.ArrayList<NewsSource>();
+                foreach (var s in srcs) {
+                    try {
+                        bool include = false;
+                        if (is_myfeed_mode) {
+                            // If no personalized categories selected, be permissive
+                            if (myfeed_cats == null || myfeed_cats.length == 0) {
+                                include = true;
+                            } else {
+                                foreach (var cat in myfeed_cats) {
+                                    if (NewsSources.supports_category(s, cat)) { include = true; break; }
+                                }
+                            }
+                        } else {
+                            if (NewsSources.supports_category(s, prefs.category)) include = true;
+                        }
+                        if (include) filtered.add(s);
+                    } catch (GLib.Error e) {
+                        // If something goes wrong querying support, include the source
+                        filtered.add(s);
+                    }
+                }
+
+                // If filtering removed all sources (unlikely), fall back to original
+                // list so we at least attempt to fetch something.
+                var use_srcs = filtered.size > 0 ? filtered : srcs;
+
+                // Clear the UI once up-front so we don't race with asynchronous
+                // fetch completions (a later-completing fetch shouldn't be able
+                // to wipe results added by an earlier one).
+                try { wrapped_clear(); } catch (GLib.Error e) { }
+
+                // Use a no-op clear for all individual fetches since we've
+                // already cleared above. Keep a combined label while in multi
+                // source mode. If we're in My Feed personalized mode, request
+                // each personalized category separately and combine results.
+                ClearItemsFunc no_op_clear = () => { };
+                SetLabelFunc label_fn = (text) => {
+                    string src_label = "Multiple Sources";
+                    string display_cat = is_myfeed_mode ? "My Feed" : category_display_name_for(prefs.category);
+                    // Avoid appending the generic "Multiple Sources" suffix to the
+                    // left-side category title since it is redundant. Only include
+                    // the source name when it is a specific source.
+                    string left_label = display_cat;
+                    if (src_label != "Multiple Sources") left_label = display_cat + " — " + src_label;
+
+                    if (current_search_query.length > 0) {
+                        self_ref.category_label.set_text("Search Results: \"" + current_search_query + "\" in " + left_label);
+                    } else {
+                        self_ref.category_label.set_text(left_label);
+                    }
+                };
+                foreach (var s in use_srcs) {
+                    if (is_myfeed_mode) {
+                        foreach (var cat in myfeed_cats) {
+                            NewsSources.fetch(s, cat, current_search_query, session, label_fn, no_op_clear, wrapped_add);
+                        }
+                    } else {
+                        NewsSources.fetch(s, prefs.category, current_search_query, session, label_fn, no_op_clear, wrapped_add);
+                    }
+                }
+            }
+        } else {
+            // Single-source path: keep existing behavior. Use the
+            // effective source so a single selected preferred_source is
+            // respected without requiring prefs.news_source to be changed.
+            if (is_myfeed_mode) {
+                // Fetch each personalized category for the single effective source
+                try { wrapped_clear(); } catch (GLib.Error e) { }
+                SetLabelFunc label_fn = (text) => {
+                    string src_label = get_source_name(effective_news_source());
+                    if (current_search_query.length > 0) {
+                        self_ref.category_label.set_text("Search Results: \"" + current_search_query + "\" in My Feed — " + src_label);
+                    } else {
+                        self_ref.category_label.set_text("My Feed — " + src_label);
+                    }
+                };
+                foreach (var cat in myfeed_cats) {
+                    NewsSources.fetch(effective_news_source(), cat, current_search_query, session, label_fn, wrapped_clear, wrapped_add);
+                }
+            } else {
+                NewsSources.fetch(
+                    effective_news_source(),
+                    prefs.category,
+                    current_search_query,
+                    session,
+                    wrapped_set_label,
+                    wrapped_clear,
+                    wrapped_add
+                );
+            }
+        }
     }
 
     private void show_load_more_button() {
