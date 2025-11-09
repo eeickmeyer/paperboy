@@ -2963,11 +2963,59 @@ public class NewsWindow : Adw.ApplicationWindow {
                     }
                 } catch (GLib.Error e) { }
 
-                var pix = new Gdk.Pixbuf.from_file_at_size(use_path, width, height);
-                if (pix != null) {
-                    var tex = Gdk.Texture.for_pixbuf(pix);
-                    try { image.set_from_paintable(tex); } catch (GLib.Error e) { }
-                    return;
+                // Load the icon and draw it centered at a reduced size so it
+                // doesn't look blown-out inside the placeholder. We create a
+                // small Cairo surface the size of the placeholder and paint
+                // a subtle background then draw the mono icon centered at
+                // ~40% of the placeholder's min dimension.
+                try {
+                    var icon_pix = new Gdk.Pixbuf.from_file(use_path);
+                    if (icon_pix != null) {
+                        int orig_w = icon_pix.get_width();
+                        int orig_h = icon_pix.get_height();
+
+                        // Target icon max size: ~40% of the placeholder
+                        double max_icon = double.min(width, height) * 0.4;
+                        // Prevent upscaling too much; only downscale if needed
+                        double scale = double.min(max_icon / (double)orig_w, max_icon / (double)orig_h);
+                        if (scale > 1.0) scale = 1.0;
+
+                        int scaled_w = (int)(orig_w * scale);
+                        int scaled_h = (int)(orig_h * scale);
+                        if (scaled_w < 1) scaled_w = 1;
+                        if (scaled_h < 1) scaled_h = 1;
+
+                        var scaled = icon_pix.scale_simple(scaled_w, scaled_h, Gdk.InterpType.BILINEAR);
+
+                        // Create a surface and draw a subtle light-blue gradient
+                        var surface = new Cairo.ImageSurface(Cairo.Format.ARGB32, width, height);
+                        var cr = new Cairo.Context(surface);
+                        var pattern = new Cairo.Pattern.linear(0, 0, 0, height);
+                        // Light blue gradient (top -> bottom). Use a slightly
+                        // darker tint so the mono icon has better contrast.
+                        // Top: softened blue (slightly darker than before)
+                        pattern.add_color_stop_rgb(0, 0.80, 0.90, 0.98);
+                        // Bottom: a touch deeper blue for subtle depth (slightly darker)
+                        pattern.add_color_stop_rgb(1, 0.70, 0.84, 0.98);
+                        cr.set_source(pattern);
+                        cr.rectangle(0, 0, width, height);
+                        cr.fill();
+
+                        // Center the icon
+                        int x = (width - scaled_w) / 2;
+                        int y = (height - scaled_h) / 2;
+                        cr.save();
+                        // Slightly translucent draw for elegance
+                        Gdk.cairo_set_source_pixbuf(cr, scaled, x, y);
+                        cr.paint_with_alpha(0.95);
+                        cr.restore();
+
+                        var tex = Gdk.Texture.for_pixbuf(Gdk.pixbuf_get_from_surface(surface, 0, 0, width, height));
+                        try { image.set_paintable(tex); } catch (GLib.Error e) { }
+                        return;
+                    }
+                } catch (GLib.Error e) {
+                    // Fall back to generic placeholder below if loading/drawing fails
                 }
             }
         } catch (GLib.Error e) {
