@@ -1749,7 +1749,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             });
         } else {
             // For specific categories, add directly
-            add_item_immediate_to_column(title, url, thumbnail_url, category_id, -1, null, source_name);
+            add_item_immediate_to_column(title, url, thumbnail_url, category_id, -1, null, final_source_name);
         }
     }
     
@@ -1827,6 +1827,14 @@ public class NewsWindow : Adw.ApplicationWindow {
     
     private void add_item_immediate_to_column(string title, string url, string? thumbnail_url, string category_id, int forced_column = -1, string? original_category = null, string? source_name = null) {
     // Check article limit for "All Categories" mode FIRST
+    // Debug: log incoming per-article source_name and URL when debugging is enabled
+    try {
+        string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+        if (_dbg != null && _dbg.length > 0) {
+            string in_src = source_name != null ? source_name : "<null>";
+            append_debug_log("add_item_immediate_to_column: incoming_source_name=" + in_src + " url=" + (url != null ? url : "<null>") + " category=" + category_id + " title=" + title);
+        }
+    } catch (GLib.Error e) { }
         // Use original_category if provided (for when category is temporarily overridden)
         string check_category = original_category ?? prefs.category;
         if (check_category == "all" && articles_shown >= INITIAL_ARTICLE_LIMIT && load_more_button == null) {
@@ -1930,7 +1938,10 @@ public class NewsWindow : Adw.ApplicationWindow {
             if (category_id == "local_news") {
                 set_local_placeholder_image(hero_image, default_hero_w, default_hero_h);
             } else {
-                set_placeholder_image(hero_image, default_hero_w, default_hero_h);
+                // Use a per-article source-branded placeholder instead of the
+                // global prefs.news_source so search results that include
+                // multiple providers show the correct branding.
+                set_placeholder_image_for_source(hero_image, default_hero_w, default_hero_h, resolve_source(source_name, url));
             }
             if (thumbnail_url != null && thumbnail_url.length > 0 &&
                 (thumbnail_url.has_prefix("http://") || thumbnail_url.has_prefix("https://"))) {
@@ -2187,7 +2198,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             if (category_id == "local_news") {
                 set_local_placeholder_image(slide_image, default_w, default_h);
             } else {
-                set_placeholder_image(slide_image, default_w, default_h);
+                set_placeholder_image_for_source(slide_image, default_w, default_h, resolve_source(source_name, url));
             }
             if (thumbnail_url != null && thumbnail_url.length > 0 &&
                 (thumbnail_url.has_prefix("http://") || thumbnail_url.has_prefix("https://"))) {
@@ -2295,7 +2306,7 @@ public class NewsWindow : Adw.ApplicationWindow {
     // provider badge because the feed may represent many sources or
     // the source attribution is already present in the feed items.
     if (category_id != "local_news") {
-        NewsSource card_src = infer_source_from_url(url);
+        NewsSource card_src = resolve_source(source_name, url);
         var card_badge = build_source_badge(card_src);
         overlay.add_overlay(card_badge);
     }
@@ -2306,7 +2317,9 @@ public class NewsWindow : Adw.ApplicationWindow {
         if (category_id == "local_news") {
             set_local_placeholder_image(image, img_w, img_h);
         } else {
-            set_placeholder_image(image, img_w, img_h);
+            // Use per-article source placeholder so cards reflect their
+            // inferred provider when multiple sources are enabled.
+            set_placeholder_image_for_source(image, img_w, img_h, resolve_source(source_name, url));
         }
         
         if (thumbnail_url != null && thumbnail_url.length > 0 && 
@@ -2423,7 +2436,7 @@ public class NewsWindow : Adw.ApplicationWindow {
 
                 if (prefs.news_source == NewsSource.REDDIT && msg.response_body.length > 2 * 1024 * 1024) {
                     Idle.add(() => {
-                        set_placeholder_image(image, target_w, target_h);
+                        set_placeholder_image_for_source(image, target_w, target_h, infer_source_from_url(url));
                         on_image_loaded(image);
                         return false;
                     });
@@ -2462,26 +2475,26 @@ public class NewsWindow : Adw.ApplicationWindow {
                                 var texture = Gdk.Texture.for_pixbuf(pixbuf);
                                 image.set_paintable(texture);
                                 on_image_loaded(image);
-                            } else {
-                                set_placeholder_image(image, target_w, target_h);
-                                on_image_loaded(image);
-                            }
+                                } else {
+                                    set_placeholder_image_for_source(image, target_w, target_h, infer_source_from_url(url));
+                                    on_image_loaded(image);
+                                }
                         } catch (GLib.Error e) {
-                            set_placeholder_image(image, target_w, target_h);
+                            set_placeholder_image_for_source(image, target_w, target_h, infer_source_from_url(url));
                             on_image_loaded(image);
                         }
                         return false;
                     });
                 } else {
                     Idle.add(() => {
-                        set_placeholder_image(image, target_w, target_h);
+                            set_placeholder_image_for_source(image, target_w, target_h, infer_source_from_url(url));
                         on_image_loaded(image);
                         return false;
                     });
                 }
             } catch (GLib.Error e) {
                 Idle.add(() => {
-                    set_placeholder_image(image, target_w, target_h);
+                        set_placeholder_image_for_source(image, target_w, target_h, infer_source_from_url(url));
                     on_image_loaded(image);
                     return false;
                 });
@@ -2516,7 +2529,7 @@ public class NewsWindow : Adw.ApplicationWindow {
                         var list = pending_downloads.get(url);
                         if (list != null) {
                             foreach (var pic in list) {
-                                set_placeholder_image(pic, target_w, target_h);
+                                set_placeholder_image_for_source(pic, target_w, target_h, infer_source_from_url(url));
                                 on_image_loaded(pic);
                             }
                             pending_downloads.remove(url);
@@ -2547,14 +2560,14 @@ public class NewsWindow : Adw.ApplicationWindow {
                             } catch (GLib.Error e) {
                                 var list2 = pending_downloads.get(url);
                                 if (list2 != null) {
-                                    foreach (var pic in list2) { set_placeholder_image(pic, target_w, target_h); on_image_loaded(pic); }
+                                    foreach (var pic in list2) { set_placeholder_image_for_source(pic, target_w, target_h, infer_source_from_url(url)); on_image_loaded(pic); }
                                     pending_downloads.remove(url);
                                 }
                             }
                         } else {
                             var list2 = pending_downloads.get(url);
                             if (list2 != null) {
-                                foreach (var pic in list2) { set_placeholder_image(pic, target_w, target_h); on_image_loaded(pic); }
+                                foreach (var pic in list2) { set_placeholder_image_for_source(pic, target_w, target_h, infer_source_from_url(url)); on_image_loaded(pic); }
                                 pending_downloads.remove(url);
                             }
                         }
@@ -2619,7 +2632,7 @@ public class NewsWindow : Adw.ApplicationWindow {
                                 var list = pending_downloads.get(url);
                                 if (list != null) {
                                     foreach (var pic in list) {
-                                        set_placeholder_image(pic, target_w, target_h);
+                                    set_placeholder_image_for_source(pic, target_w, target_h, infer_source_from_url(url));
                                         on_image_loaded(pic);
                                     }
                                     pending_downloads.remove(url);
@@ -2629,7 +2642,7 @@ public class NewsWindow : Adw.ApplicationWindow {
                             var list = pending_downloads.get(url);
                             if (list != null) {
                                 foreach (var pic in list) {
-                                    set_placeholder_image(pic, target_w, target_h);
+                                    set_placeholder_image_for_source(pic, target_w, target_h, infer_source_from_url(url));
                                     on_image_loaded(pic);
                                 }
                                 pending_downloads.remove(url);
@@ -2642,7 +2655,7 @@ public class NewsWindow : Adw.ApplicationWindow {
                         var list = pending_downloads.get(url);
                         if (list != null) {
                             foreach (var pic in list) {
-                                set_placeholder_image(pic, target_w, target_h);
+                                    set_placeholder_image_for_source(pic, target_w, target_h, infer_source_from_url(url));
                                 on_image_loaded(pic);
                             }
                             pending_downloads.remove(url);
@@ -2655,7 +2668,7 @@ public class NewsWindow : Adw.ApplicationWindow {
                     var list = pending_downloads.get(url);
                     if (list != null) {
                         foreach (var pic in list) {
-                            set_placeholder_image(pic, target_w, target_h);
+                            set_placeholder_image_for_source(pic, target_w, target_h, infer_source_from_url(url));
                             on_image_loaded(pic);
                         }
                         pending_downloads.remove(url);
@@ -2786,6 +2799,37 @@ public class NewsWindow : Adw.ApplicationWindow {
         if (low.index_of("foxnews") >= 0 || low.index_of("fox.com") >= 0) return NewsSource.FOX;
         // Unknown, return preference as a sensible default
         return prefs.news_source;
+    }
+
+    // Resolve a NewsSource from a provided display/source name if possible;
+    // fall back to URL inference when the name is missing or unrecognized.
+    private NewsSource resolve_source(string? source_name, string? url) {
+        // Start with URL-inferred source as a sensible default
+        NewsSource resolved = infer_source_from_url(url);
+        if (source_name != null && source_name.length > 0) {
+            string low = source_name.down();
+            if (low.index_of("guardian") >= 0) resolved = NewsSource.GUARDIAN;
+            else if (low.index_of("bbc") >= 0) resolved = NewsSource.BBC;
+            else if (low.index_of("reddit") >= 0) resolved = NewsSource.REDDIT;
+            else if (low.index_of("nytimes") >= 0 || low.index_of("new york") >= 0) resolved = NewsSource.NEW_YORK_TIMES;
+            else if (low.index_of("wsj") >= 0 || low.index_of("wall street") >= 0) resolved = NewsSource.WALL_STREET_JOURNAL;
+            else if (low.index_of("bloomberg") >= 0) resolved = NewsSource.BLOOMBERG;
+            else if (low.index_of("reuters") >= 0) resolved = NewsSource.REUTERS;
+            else if (low.index_of("npr") >= 0) resolved = NewsSource.NPR;
+            else if (low.index_of("fox") >= 0) resolved = NewsSource.FOX;
+            // If we couldn't match the provided name, keep the URL-inferred value
+        }
+
+        // Debug: write a trace when PAPERBOY_DEBUG is set so we can inspect decisions
+        try {
+            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+            if (_dbg != null && _dbg.length > 0) {
+                string in_src = source_name != null ? source_name : "<null>";
+                append_debug_log("resolve_source: input_name=" + in_src + " url=" + (url != null ? url : "<null>") + " resolved=" + get_source_name(resolved));
+            }
+        } catch (GLib.Error e) { }
+
+        return resolved;
     }
 
     // Build a small source badge widget (icon + short name) to place in the
@@ -3013,6 +3057,156 @@ public class NewsWindow : Adw.ApplicationWindow {
         } else {
             // Fallback to text-based placeholder
             create_source_text_placeholder(image, source_name, width, height);
+        }
+    }
+
+    // Variant that honors an explicit NewsSource so the UI can render a
+    // per-article branded placeholder even when the application's global
+    // prefs.news_source differs (useful when multiple sources are enabled).
+    private void set_placeholder_image_for_source(Gtk.Picture image, int width, int height, NewsSource source) {
+        string? icon_path = get_source_icon_path(source);
+        string source_name = get_source_name(source);
+        if (icon_path != null) {
+            try {
+                // Draw icon-centered placeholder with a gradient chosen by the
+                // provided source (not the global prefs.news_source).
+                var surface = new Cairo.ImageSurface(Cairo.Format.ARGB32, width, height);
+                var cr = new Cairo.Context(surface);
+                var gradient = new Cairo.Pattern.linear(0, 0, 0, height);
+                switch (source) {
+                    case NewsSource.GUARDIAN:
+                        gradient.add_color_stop_rgb(0, 0.0, 0.2, 0.4);
+                        gradient.add_color_stop_rgb(1, 0.0, 0.4, 0.6);
+                        break;
+                    case NewsSource.BBC:
+                        gradient.add_color_stop_rgb(0, 0.6, 0.0, 0.0);
+                        gradient.add_color_stop_rgb(1, 0.8, 0.1, 0.1);
+                        break;
+                    case NewsSource.REDDIT:
+                        gradient.add_color_stop_rgb(0, 1.0, 0.2, 0.0);
+                        gradient.add_color_stop_rgb(1, 1.0, 0.4, 0.1);
+                        break;
+                    case NewsSource.NEW_YORK_TIMES:
+                        gradient.add_color_stop_rgb(0, 0.1, 0.1, 0.1);
+                        gradient.add_color_stop_rgb(1, 0.3, 0.3, 0.3);
+                        break;
+                    case NewsSource.BLOOMBERG:
+                        gradient.add_color_stop_rgb(0, 0.0, 0.3, 0.7);
+                        gradient.add_color_stop_rgb(1, 0.1, 0.5, 0.9);
+                        break;
+                    case NewsSource.REUTERS:
+                        gradient.add_color_stop_rgb(0, 0.3, 0.3, 0.4);
+                        gradient.add_color_stop_rgb(1, 0.5, 0.5, 0.6);
+                        break;
+                    case NewsSource.NPR:
+                        gradient.add_color_stop_rgb(0, 0.1, 0.2, 0.5);
+                        gradient.add_color_stop_rgb(1, 0.2, 0.3, 0.7);
+                        break;
+                    case NewsSource.FOX:
+                        gradient.add_color_stop_rgb(0, 0.0, 0.2, 0.6);
+                        gradient.add_color_stop_rgb(1, 0.1, 0.3, 0.8);
+                        break;
+                    default:
+                        gradient.add_color_stop_rgb(0, 0.3, 0.3, 0.4);
+                        gradient.add_color_stop_rgb(1, 0.5, 0.5, 0.6);
+                        break;
+                }
+                cr.set_source(gradient);
+                cr.rectangle(0, 0, width, height);
+                cr.fill();
+
+                var icon_pixbuf = new Gdk.Pixbuf.from_file(icon_path);
+                if (icon_pixbuf != null) {
+                    int orig_w = icon_pixbuf.get_width();
+                    int orig_h = icon_pixbuf.get_height();
+                    double max_size = double.min(width, height) * 0.5;
+                    double scale = double.min(max_size / orig_w, max_size / orig_h);
+                    int scaled_w = (int)(orig_w * scale);
+                    int scaled_h = (int)(orig_h * scale);
+                    var scaled_icon = icon_pixbuf.scale_simple(scaled_w, scaled_h, Gdk.InterpType.BILINEAR);
+                    int x = (width - scaled_w) / 2;
+                    int y = (height - scaled_h) / 2;
+                    cr.save();
+                    cr.set_source_rgba(1, 1, 1, 0.9);
+                    Gdk.cairo_set_source_pixbuf(cr, scaled_icon, x, y);
+                    cr.paint_with_alpha(0.95);
+                    cr.restore();
+                }
+
+                var texture = Gdk.Texture.for_pixbuf(Gdk.pixbuf_get_from_surface(surface, 0, 0, width, height));
+                image.set_paintable(texture);
+                return;
+            } catch (GLib.Error e) {
+                // Fall through to text placeholder on error
+            }
+        }
+
+        // Text-based fallback
+        try {
+            var surface = new Cairo.ImageSurface(Cairo.Format.ARGB32, width, height);
+            var cr = new Cairo.Context(surface);
+            var gradient = new Cairo.Pattern.linear(0, 0, 0, height);
+            switch (source) {
+                case NewsSource.GUARDIAN:
+                    gradient.add_color_stop_rgb(0, 0.0, 0.3, 0.6);
+                    gradient.add_color_stop_rgb(1, 0.0, 0.5, 0.8);
+                    break;
+                case NewsSource.BBC:
+                    gradient.add_color_stop_rgb(0, 0.7, 0.0, 0.0);
+                    gradient.add_color_stop_rgb(1, 0.9, 0.2, 0.2);
+                    break;
+                case NewsSource.REDDIT:
+                    gradient.add_color_stop_rgb(0, 1.0, 0.3, 0.0);
+                    gradient.add_color_stop_rgb(1, 1.0, 0.5, 0.2);
+                    break;
+                case NewsSource.NEW_YORK_TIMES:
+                    gradient.add_color_stop_rgb(0, 0.0, 0.0, 0.0);
+                    gradient.add_color_stop_rgb(1, 0.2, 0.2, 0.2);
+                    break;
+                case NewsSource.BLOOMBERG:
+                    gradient.add_color_stop_rgb(0, 0.0, 0.4, 0.8);
+                    gradient.add_color_stop_rgb(1, 0.2, 0.6, 1.0);
+                    break;
+                case NewsSource.REUTERS:
+                    gradient.add_color_stop_rgb(0, 0.4, 0.4, 0.4);
+                    gradient.add_color_stop_rgb(1, 0.6, 0.6, 0.6);
+                    break;
+                case NewsSource.NPR:
+                    gradient.add_color_stop_rgb(0, 0.2, 0.2, 0.6);
+                    gradient.add_color_stop_rgb(1, 0.4, 0.4, 0.8);
+                    break;
+                case NewsSource.FOX:
+                    gradient.add_color_stop_rgb(0, 0.0, 0.3, 0.7);
+                    gradient.add_color_stop_rgb(1, 0.2, 0.5, 0.9);
+                    break;
+                default:
+                    gradient.add_color_stop_rgb(0, 0.4, 0.4, 0.4);
+                    gradient.add_color_stop_rgb(1, 0.6, 0.6, 0.6);
+                    break;
+            }
+            cr.set_source(gradient);
+            cr.rectangle(0, 0, width, height);
+            cr.fill();
+
+            cr.select_font_face("Sans", Cairo.FontSlant.NORMAL, Cairo.FontWeight.BOLD);
+            double font_size = double.min(width / 8.0, height / 4.0);
+            font_size = double.max(font_size, 12.0);
+            cr.set_font_size(font_size);
+            Cairo.TextExtents extents;
+            cr.text_extents(source_name, out extents);
+            double x = (width - extents.width) / 2;
+            double y = (height + extents.height) / 2;
+            cr.set_source_rgba(0, 0, 0, 0.5);
+            cr.move_to(x + 2, y + 2);
+            cr.show_text(source_name);
+            cr.set_source_rgba(1, 1, 1, 0.9);
+            cr.move_to(x, y);
+            cr.show_text(source_name);
+            var texture = Gdk.Texture.for_pixbuf(Gdk.pixbuf_get_from_surface(surface, 0, 0, width, height));
+            image.set_paintable(texture);
+        } catch (GLib.Error e) {
+            // as a last resort fall back to the generic gradient placeholder
+            create_gradient_placeholder(image, width, height);
         }
     }
 
