@@ -631,7 +631,17 @@ public class NewsWindow : Adw.ApplicationWindow {
         sidebar_add_row("Health", "health", prefs.category == "health");
         sidebar_add_row("Entertainment", "entertainment", prefs.category == "entertainment");
         sidebar_add_row("Politics", "politics", prefs.category == "politics");
-        sidebar_add_row("Lifestyle", "lifestyle", prefs.category == "lifestyle");
+        // Only show "Lifestyle" for sources that actually support it. BBC
+        // does not expose a dedicated lifestyle RSS feed, so hide the row
+        // when the effective single source is BBC.
+        try {
+            if (NewsSources.supports_category(sidebar_eff, "lifestyle")) {
+                sidebar_add_row("Lifestyle", "lifestyle", prefs.category == "lifestyle");
+            }
+        } catch (GLib.Error e) {
+            // On error, conservatively show the row to avoid hiding UI unexpectedly
+            sidebar_add_row("Lifestyle", "lifestyle", prefs.category == "lifestyle");
+        }
     }
     }
 

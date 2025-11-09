@@ -269,6 +269,12 @@ public class NewsSources {
         // Only Bloomberg needs special handling: it exposes a narrower set
         // of dedicated sections. All other sources can be considered to
         // support the common categories (and many use site-search fallbacks).
+        // BBC does not provide a dedicated "lifestyle" RSS feed; hide that
+        // category for BBC so the UI won't show it when BBC is selected.
+        if (source == NewsSource.BBC) {
+            if (category == "lifestyle") return false;
+        }
+
         if (source == NewsSource.BLOOMBERG) {
             switch (category) {
                 case "markets":
@@ -360,10 +366,6 @@ public class NewsSources {
         ClearItemsFunc clear_items,
         AddItemFunc add_item
     ) {
-        if (current_search_query.length > 0) {
-            fetch_google_domain(current_category, current_search_query, session, set_label, clear_items, add_item, "bbc.co.uk", "BBC News");
-            return;
-        }
         string url = "https://feeds.bbci.co.uk/news/world/rss.xml";
         switch (current_category) {
             case "technology":
@@ -387,10 +389,9 @@ public class NewsSources {
             case "entertainment":
                 url = "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml";
                 break;
-            case "lifestyle":
-                // No clear lifestyle feed; use site search to approximate
-                fetch_google_domain(current_category, current_search_query, session, set_label, clear_items, add_item, "bbc.co.uk", "BBC News");
-                return;
+            // Note: BBC does not have a dedicated "lifestyle" RSS feed. The
+            // UI will not show "lifestyle" for BBC (see supports_category),
+            // so we avoid attempting a site-search fallback here.
             default:
                 url = "https://feeds.bbci.co.uk/news/world/rss.xml";
                 break;

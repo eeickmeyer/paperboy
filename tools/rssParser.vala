@@ -68,7 +68,12 @@ public class RssParser {
                                         Xml.Attr* a = c->properties;
                                         while (a != null) {
                                             if (a->name == "url") {
-                                                thumb = a->children != null ? (string) a->children->content : null;
+                                                        thumb = a->children != null ? (string) a->children->content : null;
+                                                        // Normalize protocol-relative URLs and HTML entities
+                                                        if (thumb != null) {
+                                                            if (thumb.has_prefix("//")) thumb = "https:" + thumb;
+                                                            thumb = thumb.replace("&amp;", "&");
+                                                        }
                                                 break;
                                             }
                                             a = a->next;
@@ -77,7 +82,12 @@ public class RssParser {
                                         Xml.Attr* a2 = c->properties;
                                         while (a2 != null) {
                                             if (a2->name == "url") {
-                                                thumb = a2->children != null ? (string) a2->children->content : null;
+                                                        thumb = a2->children != null ? (string) a2->children->content : null;
+                                                        // Normalize protocol-relative URLs and HTML entities
+                                                        if (thumb != null) {
+                                                            if (thumb.has_prefix("//")) thumb = "https:" + thumb;
+                                                            thumb = thumb.replace("&amp;", "&");
+                                                        }
                                                 break;
                                             }
                                             a2 = a2->next;

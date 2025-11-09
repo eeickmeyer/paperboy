@@ -51,80 +51,53 @@ public class ImageParser {
 
 	// Extract image URL from an HTML snippet (like RSS description or content:encoded).
 	public static string? extract_image_from_html_snippet(string html_snippet) {
-		// Look for img tags in the snippet
-		int search_pos = 0;
-		
-		while (search_pos < html_snippet.length) {
-			int img_pos = html_snippet.index_of("<img", search_pos);
-			if (img_pos == -1) break;
-			
-			int src_start = html_snippet.index_of("src=\"", img_pos);
-			if (src_start == -1) {
-				src_start = html_snippet.index_of("src='", img_pos);
-				if (src_start != -1) src_start += 5;
-			} else {
-				src_start += 5;
-			}
-			
-			if (src_start != -1) {
-				int src_end = html_snippet.index_of("\"", src_start);
-				if (src_end == -1) {
-					src_end = html_snippet.index_of("'", src_start);
-				}
-				
-				if (src_end != -1) {
-					string img_url = html_snippet.substring(src_start, src_end - src_start);
-					
-					// Decode HTML entities in the URL
-					img_url = img_url.replace("&amp;", "&");
-					img_url = img_url.replace("&lt;", "<");
-					img_url = img_url.replace("&gt;", ">");
-					img_url = img_url.replace("&quot;", "\"");
-					
-					// Basic URL decoding for NPR-style URLs
-					img_url = img_url.replace("%3A", ":");
-					img_url = img_url.replace("%2F", "/");
-					img_url = img_url.replace("%3F", "?");
-					img_url = img_url.replace("%3D", "=");
-					img_url = img_url.replace("%26", "&");
-					
-					// Check if this is a NPR-style resizing URL with nested image URL
-					if (img_url.contains("?url=http")) {
-						int url_param_start = img_url.index_of("?url=") + 5;
-						if (url_param_start > 4 && url_param_start < img_url.length) {
-							string nested_url = img_url.substring(url_param_start);
-							// If the nested URL looks like a proper image URL, use it instead
-							if (nested_url.length > 30 && nested_url.has_prefix("http")) {
-								img_url = nested_url;
-							}
-						}
-					}
-					
-					string img_url_lower = img_url.down();
-					
-					// Enhanced filtering to skip unwanted images but allow more legitimate ones
-					bool is_tracking_pixel = img_url_lower.contains("tracking") || 
-									img_url_lower.contains("pixel") ||
-									img_url_lower.contains("1x1") ||
-									img_url.length < 30;
-					
-					bool is_valid_image = img_url.length > 30 && 
-						!img_url_lower.contains("icon") && 
-						!img_url_lower.contains("logo") && 
-						!is_tracking_pixel &&
-						(img_url.has_prefix("http") || img_url.has_prefix("//")) &&
-						(img_url_lower.contains("jpg") || img_url_lower.contains("jpeg") || 
-						 img_url_lower.contains("png") || img_url_lower.contains("webp") || 
-						 img_url_lower.contains("gif")); // Must be an actual image format
-					
-					if (is_valid_image) {
-						return img_url.has_prefix("//") ? "https:" + img_url : img_url;
-					}
+		// Look for common image attributes used by BBC: src, data-src, srcset and data-srcset
+		var attr_regex = new Regex("(src|data-src|srcset|data-srcset)=[\"']([^\"']+)[\"']", RegexCompileFlags.DEFAULT);
+		MatchInfo m;
+		if (!attr_regex.match(html_snippet, 0, out m)) return null;
+		do {
+			string attr_name = m.fetch(1).down();
+			string attr_val = m.fetch(2);
+			// For srcset-like attributes, take the first URL (it may contain descriptors)
+				if (attr_name.has_suffix("srcset")) {
+				// srcset: "url1 1x, url2 2x" -> take url1
+				string[] parts = attr_val.split(",");
+				if (parts.length > 0) {
+					attr_val = parts[0].strip();
+					// If there is a descriptor (" 1x"), remove it
+                		int space_idx = attr_val.index_of(" ");
+                		if (space_idx > 0) attr_val = attr_val.substring(0, space_idx);
 				}
 			}
+			string img_url = attr_val;
+			// Decode HTML entities
+			img_url = img_url.replace("&amp;", "&");
+			img_url = img_url.replace("&lt;", "<");
+			img_url = img_url.replace("&gt;", ">");
+			img_url = img_url.replace("&quot;", "\"");
+			// Basic URL decode for common percent-encodings
+			img_url = img_url.replace("%3A", ":");
+			img_url = img_url.replace("%2F", "/");
+			img_url = img_url.replace("%3F", "?");
+			img_url = img_url.replace("%3D", "=");
+			img_url = img_url.replace("%26", "&");
 			
-			search_pos = img_pos + 4; // Move past this <img tag
-		}
+			// If the URL is protocol-relative, prefer https
+			if (img_url.has_prefix("//")) img_url = "https:" + img_url;
+			
+			// If it's a data URI or clearly invalid, skip
+			string img_url_lower = img_url.down();
+			if (img_url_lower.has_prefix("data:") || img_url.length < 20) {
+				// continue searching
+				continue;
+			}
+			// Filter out icons, logos and tracking pixels but accept common image extensions
+			bool is_tracking_pixel = img_url_lower.contains("tracking") || img_url_lower.contains("pixel") || img_url_lower.contains("1x1");
+			bool looks_like_image = img_url_lower.contains("jpg") || img_url_lower.contains("jpeg") || img_url_lower.contains("png") || img_url_lower.contains("webp") || img_url_lower.contains("gif");
+			if (!is_tracking_pixel && looks_like_image && (img_url.has_prefix("http") || img_url.has_prefix("https:"))) {
+				return img_url;
+			}
+		} while (m.next());
 		return null;
 	}
 
