@@ -243,6 +243,7 @@ public class NewsWindow : Adw.ApplicationWindow {
     // Loading spinner for initial content load
     private Gtk.Spinner? loading_spinner = null;
     private Gtk.Box? loading_container = null;
+    private Gtk.Label? loading_label = null;
     // Message box shown in main content when personalized feed is disabled
     private Gtk.Box? personalized_message_box = null;
     // Label and action button inside the personalized message overlay
@@ -1120,14 +1121,15 @@ public class NewsWindow : Adw.ApplicationWindow {
         loading_container.set_vexpand(false);
         loading_container.set_visible(false);
         
-        loading_spinner = new Gtk.Spinner();
-        loading_spinner.set_size_request(48, 48);
-        loading_container.append(loading_spinner);
-        
-        var loading_label = new Gtk.Label("Loading news...");
-        loading_label.add_css_class("dim-label");
-        loading_label.add_css_class("title-4");
-        loading_container.append(loading_label);
+    loading_spinner = new Gtk.Spinner();
+    loading_spinner.set_size_request(48, 48);
+    loading_container.append(loading_spinner);
+
+    // Use the instance field so we can change the message for Local News
+    loading_label = new Gtk.Label("Loading news...");
+    loading_label.add_css_class("dim-label");
+    loading_label.add_css_class("title-4");
+    loading_container.append(loading_label);
         
         // Add loading spinner as overlay on top of main content area
         main_overlay.add_overlay(loading_container);
@@ -3520,14 +3522,26 @@ public class NewsWindow : Adw.ApplicationWindow {
     }
     
     private void show_loading_spinner() {
-        if (loading_container != null && loading_spinner != null) {
+        if (loading_container != null && loading_spinner != null && loading_label != null) {
+            // If we're fetching Local News, show a more specific message
+            try {
+                var prefs_local = NewsPreferences.get_instance();
+                if (prefs_local != null && prefs_local.category == "local_news") {
+                    loading_label.set_text("Loading local news...");
+                } else {
+                    loading_label.set_text("Loading news...");
+                }
+            } catch (GLib.Error e) { /* best-effort */ }
+
             loading_container.set_visible(true);
             loading_spinner.start();
         }
     }
     
     private void hide_loading_spinner() {
-        if (loading_container != null && loading_spinner != null) {
+        if (loading_container != null && loading_spinner != null && loading_label != null) {
+            // Reset generic message when hiding
+            try { loading_label.set_text("Loading news..."); } catch (GLib.Error e) { }
             loading_container.set_visible(false);
             loading_spinner.stop();
         }
@@ -3752,11 +3766,50 @@ public class NewsWindow : Adw.ApplicationWindow {
         };
 
         // Wrapped add_item: ignore items from stale fetches
+    // Throttled add for Local News: queue incoming items and process in small batches
+    var local_news_queue = new Gee.ArrayList<ArticleItem>();
+    bool local_news_flush_scheduled = false;
+
     AddItemFunc wrapped_add = (title, url, thumbnail, category_id, source_name) => {
             if (my_seq != self_ref.fetch_sequence) {
                 try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) append_debug_log("wrapped_add: ignoring stale seq=" + my_seq.to_string() + " current=" + self_ref.fetch_sequence.to_string() + " article_cat=" + category_id); } catch (GLib.Error e) { }
                 return;
             }
+
+            // If we're in Local News mode, enqueue and process in small batches to avoid UI lockups
+            try {
+                var prefs_local = NewsPreferences.get_instance();
+                if (prefs_local != null && prefs_local.category == "local_news") {
+                    local_news_queue.add(new ArticleItem(title, url, thumbnail, category_id, source_name));
+                    if (!local_news_flush_scheduled) {
+                        local_news_flush_scheduled = true;
+                        // Process up to 6 items per tick to keep UI responsive
+                        Timeout.add(60, () => {
+                            int processed = 0;
+                            int batch = 6;
+                            while (local_news_queue.size > 0 && processed < batch) {
+                                var ai = local_news_queue.get(0);
+                                local_news_queue.remove_at(0);
+                                // Ensure still current before adding
+                                if (my_seq == self_ref.fetch_sequence) {
+                                    self_ref.add_item(ai.title, ai.url, ai.thumbnail_url, ai.category_id, ai.source_name);
+                                }
+                                processed++;
+                            }
+                            if (local_news_queue.size > 0) {
+                                // Keep the timeout running until the queue is drained
+                                return true;
+                            } else {
+                                local_news_flush_scheduled = false;
+                                return false;
+                            }
+                        });
+                    }
+                    return;
+                }
+            } catch (GLib.Error e) { /* best-effort */ }
+
+            // Default: immediate add
             self_ref.add_item(title, url, thumbnail, category_id, source_name);
         };
 
