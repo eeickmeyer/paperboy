@@ -306,22 +306,7 @@ public class NewsSources {
         }
         string url = @"$(base_url)?q=$(Uri.escape_string(query))&$(ceid)";
         
-        // Wrap the provided add_item delegate so we can optionally log each
-        // article added by site-search flows when PAPERBOY_DEBUG is set.
-        AddItemFunc logged_add_item = (string title, string url2, string? thumbnail_url2, string category_id2, string? source_name2) => {
-            try {
-                string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-                if (dbg != null && dbg.length > 0) {
-                    // Use warning() so logs are visible when running from a terminal
-                    // and can be captured by the user. Keep message short to avoid
-                    // overwhelming the log.
-                    warning("newsSources: site-search add_item: source=%s title=%s url=%s", source_name2 != null ? source_name2 : "(null)", title, url2);
-                }
-            } catch (GLib.Error e) { }
-            add_item(title, url2, thumbnail_url2, category_id2, source_name2);
-        };
-
-        RssParser.fetch_rss_url(url, source_name, category_name, current_category, current_search_query, session, set_label, clear_items, logged_add_item);
+        RssParser.fetch_rss_url(url, source_name, category_name, current_category, current_search_query, session, set_label, clear_items, add_item);
     }
 
     private static void fetch_nyt(
