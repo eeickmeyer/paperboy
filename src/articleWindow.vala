@@ -140,7 +140,7 @@ public class ArticleWindow : GLib.Object {
             int multiplier = (article_src == NewsSource.REDDIT) ? 2 : 3;
             int target_w = img_w * multiplier;
             int target_h = img_h * multiplier;
-            load_image_async(pic, thumbnail_url, target_w, target_h);
+            load_image_async(pic, thumbnail_url, target_w, target_h, article_src);
         }
         pic_box.append(pic);
         outer.append(pic_box);
@@ -300,7 +300,7 @@ public class ArticleWindow : GLib.Object {
         
     }
 
-    private void load_image_async(Gtk.Picture image, string url, int target_w, int target_h) {
+    private void load_image_async(Gtk.Picture image, string url, int target_w, int target_h, NewsSource article_src) {
         new Thread<void*>("load-image", () => {
             try {
                 // download initiated
@@ -324,10 +324,10 @@ public class ArticleWindow : GLib.Object {
                 // status received
                 
                 // Skip extremely large images to prevent slowdowns (especially for Reddit)
-                if (prefs_instance.news_source == NewsSource.REDDIT && msg.response_body.length > 2 * 1024 * 1024) {
+                    if (prefs_instance.news_source == NewsSource.REDDIT && msg.response_body.length > 2 * 1024 * 1024) {
                     print("Skipping large Reddit image (%ld bytes), using placeholder\n", (long)msg.response_body.length);
                     Idle.add(() => {
-                        set_placeholder_image(image, target_w, target_h);
+                        set_placeholder_image_for_source(image, target_w, target_h, article_src);
                         return false;
                     });
                     return null;
@@ -375,9 +375,9 @@ public class ArticleWindow : GLib.Object {
                                 var texture = Gdk.Texture.for_pixbuf(pixbuf);
                                 image.set_paintable(texture);
                                 print("✓ Image set successfully\n");
-                            } else {
-                                // pixbuf null -> use placeholder
-                                set_placeholder_image(image, target_w, target_h);
+                                } else {
+                                // pixbuf null -> use per-article placeholder
+                                set_placeholder_image_for_source(image, target_w, target_h, article_src);
                             }
                         } catch (GLib.Error e) {
                             // error loading image
@@ -388,14 +388,14 @@ public class ArticleWindow : GLib.Object {
                 } else {
                     // HTTP error or empty body
                     Idle.add(() => {
-                        set_placeholder_image(image, target_w, target_h);
+                        set_placeholder_image_for_source(image, target_w, target_h, article_src);
                         return false;
                     });
                 }
             } catch (GLib.Error e) {
                 // download error
-                Idle.add(() => {
-                    set_placeholder_image(image, target_w, target_h);
+                    Idle.add(() => {
+                    set_placeholder_image_for_source(image, target_w, target_h, article_src);
                     return false;
                 });
             }
