@@ -246,6 +246,11 @@ public class NewsWindow : Adw.ApplicationWindow {
     // Label and action button inside the personalized message overlay
     private Gtk.Label? personalized_message_label = null;
     private Gtk.Button? personalized_message_action = null;
+    // Local-news guidance overlay (shown when no location configured)
+    private Gtk.Box? local_news_message_box = null;
+    private Gtk.Label? local_news_title = null;
+    private Gtk.Label? local_news_hint = null;
+    private Gtk.Button? local_news_button = null;
     // Initial-load gating: wait for hero (or timeout) before revealing main content
     private bool initial_phase = false;
     private bool hero_image_loaded = false;
@@ -327,6 +332,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             case "wealth": filename = "wealth-mono.svg"; break;
             case "green": filename = "green-mono.svg"; break;
             case "us": filename = "us-mono.svg"; break;
+            case "local_news": filename = "local-mono.svg"; break;
             case "technology": filename = "technology-mono.svg"; break;
             case "science": filename = "science-mono.svg"; break;
             case "sports": filename = "sports-mono.svg"; break;
@@ -390,6 +396,9 @@ public class NewsWindow : Adw.ApplicationWindow {
                 break;
             case "us":
                 candidates = { "mark-location-symbolic", "flag-symbolic", "map-symbolic" };
+                break;
+            case "local_news":
+                candidates = { "mark-location-symbolic", "map-marker-symbolic", "map-symbolic" };
                 break;
             case "technology":
                 candidates = { "computer-symbolic", "applications-engineering-symbolic", "applications-system-symbolic" };
@@ -469,6 +478,11 @@ public class NewsWindow : Adw.ApplicationWindow {
             } catch (GLib.Error e) { }
             prefs.save_config();
             try { sidebar_list.select_row(row); } catch (GLib.Error e) { }
+            // Immediately update local-news overlay visibility so the UI
+            // reflects the new selection without waiting for the deferred
+            // idle callback. This avoids confusing delays where clicking
+            // "Local News" appears to do nothing.
+            try { update_local_news_ui(); } catch (GLib.Error e) { }
 
             // Defer the fetch to the main loop to avoid re-entrant rebuilds
             // that remove the row while the handler is still running. Set
@@ -525,6 +539,8 @@ public class NewsWindow : Adw.ApplicationWindow {
 
     // Place "My Feed" above the Categories header, then include the "All Categories" option
     sidebar_add_row("My Feed", "myfeed", prefs.category == "myfeed");
+    // Local News is a special sidebar item that is not part of Categories
+    sidebar_add_row("Local News", "local_news", prefs.category == "local_news");
     sidebar_add_header("Categories");
     sidebar_add_row("All Categories", "all", prefs.category == "all");
 
@@ -619,6 +635,39 @@ public class NewsWindow : Adw.ApplicationWindow {
 
     // Update the source logo and label based on current news source
     private void update_source_info() {
+        // If the user is viewing Local News, prefer the app-local
+        // 'local-mono' symbolic icon (and its white variant in dark mode).
+        // This prevents theme-change handlers from overwriting the Local
+        // News badge with a provider-specific logo (e.g. Guardian).
+        try {
+            if (prefs != null && prefs.category == "local_news") {
+                try { source_label.set_text("Local News"); } catch (GLib.Error e) { }
+                try {
+                    string? local_icon = find_data_file(GLib.Path.build_filename("icons", "symbolic", "local-mono.svg"));
+                    if (local_icon == null) local_icon = find_data_file(GLib.Path.build_filename("icons", "local-mono.svg"));
+                    if (local_icon != null) {
+                        string use_path = local_icon;
+                        try {
+                            if (is_dark_mode()) {
+                                string? white_cand = find_data_file(GLib.Path.build_filename("icons", "symbolic", "local-mono-white.svg"));
+                                if (white_cand == null) white_cand = find_data_file(GLib.Path.build_filename("icons", "local-mono-white.svg"));
+                                if (white_cand != null) use_path = white_cand;
+                            }
+                        } catch (GLib.Error e) { }
+                        var pix = new Gdk.Pixbuf.from_file_at_size(use_path, 32, 32);
+                        if (pix != null) {
+                            var tex = Gdk.Texture.for_pixbuf(pix);
+                            try { source_logo.set_from_paintable(tex); } catch (GLib.Error e) { try { source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { } }
+                        } else {
+                            try { source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error e) { }
+                        }
+                    } else {
+                        try { source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error e) { }
+                    }
+                } catch (GLib.Error e) { try { source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { } }
+                return;
+            }
+        } catch (GLib.Error e) { }
         // If multiple preferred sources are selected, show a combined label
         if (prefs.preferred_sources != null && prefs.preferred_sources.size > 1) {
             source_label.set_text("Multiple Sources");
@@ -915,6 +964,8 @@ public class NewsWindow : Adw.ApplicationWindow {
 
     // Place "My Feed" above the Categories header, then include the "All Categories" option
     sidebar_add_row("My Feed", "myfeed", prefs.category == "myfeed");
+    // Local News is a special sidebar item that is not part of Categories
+    sidebar_add_row("Local News", "local_news", prefs.category == "local_news");
     sidebar_add_header("Categories");
     sidebar_add_row("All Categories", "all", prefs.category == "all");
         // Default site categories (will be rebuilt for sources like Bloomberg)
@@ -1141,6 +1192,51 @@ public class NewsWindow : Adw.ApplicationWindow {
     // Add the personalized message overlay on top of the root overlay
     root_overlay.add_overlay(personalized_message_box);
 
+    // Local News overlay: shown when the user selects Local News but has not
+    // configured a location in preferences. This is separate from the
+    // personalized_message_box so it can be tailored to local-news guidance.
+    local_news_message_box = new Gtk.Box(Gtk.Orientation.VERTICAL, 8);
+    local_news_message_box.set_halign(Gtk.Align.FILL);
+    local_news_message_box.set_valign(Gtk.Align.FILL);
+    local_news_message_box.set_hexpand(true);
+    local_news_message_box.set_vexpand(true);
+
+    var ln_inner = new Gtk.Box(Gtk.Orientation.VERTICAL, 0);
+    ln_inner.set_hexpand(true);
+    ln_inner.set_vexpand(true);
+    ln_inner.set_halign(Gtk.Align.CENTER);
+    ln_inner.set_valign(Gtk.Align.CENTER);
+
+    local_news_title = new Gtk.Label("To See Local News, Set Your Location in Preferences");
+    local_news_title.add_css_class("title-4");
+    local_news_title.add_css_class("dim-label");
+    local_news_title.set_halign(Gtk.Align.CENTER);
+    local_news_title.set_valign(Gtk.Align.CENTER);
+    try { local_news_title.set_justify(Gtk.Justification.CENTER); } catch (GLib.Error e) { }
+    try { local_news_title.set_wrap(true); } catch (GLib.Error e) { }
+    ln_inner.append(local_news_title);
+
+    local_news_hint = new Gtk.Label("Open the main menu (☰) and choose 'Set User Location' to configure your city or ZIP code.");
+    local_news_hint.add_css_class("dim-label");
+    local_news_hint.set_halign(Gtk.Align.CENTER);
+    local_news_hint.set_valign(Gtk.Align.CENTER);
+    try { local_news_hint.set_wrap(true); } catch (GLib.Error e) { }
+    local_news_hint.set_margin_top(6);
+    ln_inner.append(local_news_hint);
+
+    local_news_button = new Gtk.Button.with_label("Set Location");
+    local_news_button.set_halign(Gtk.Align.CENTER);
+    local_news_button.set_valign(Gtk.Align.CENTER);
+    local_news_button.set_margin_top(12);
+    local_news_button.clicked.connect(() => {
+        try { PrefsDialog.show_set_location_dialog(this); } catch (GLib.Error e) { }
+    });
+    ln_inner.append(local_news_button);
+
+    local_news_message_box.append(ln_inner);
+    local_news_message_box.set_visible(false);
+    root_overlay.add_overlay(local_news_message_box);
+
     split_view.set_content(root_overlay);
         split_view.set_show_sidebar(true);
 
@@ -1305,6 +1401,27 @@ public class NewsWindow : Adw.ApplicationWindow {
                 loading_container.set_visible(false);
             }
         } catch (GLib.Error e) { }
+
+        // Also update local-news guidance overlay state in case the user
+        // selected the Local News row. This keeps all overlay visibility
+        // logic centralized.
+        try { update_local_news_ui(); } catch (GLib.Error e) { }
+    }
+
+    // Show or hide the Local News guidance overlay depending on whether
+    // the user has configured a location and whether Local News is active.
+    public void update_local_news_ui() {
+        if (local_news_message_box == null || main_content_container == null) return;
+        var prefs = NewsPreferences.get_instance();
+        bool needs_location = false;
+        try {
+            bool is_local = prefs.category == "local_news";
+            bool has_location = prefs.user_location != null && prefs.user_location.length > 0;
+            needs_location = is_local && !has_location;
+        } catch (GLib.Error e) { needs_location = false; }
+
+        try { local_news_message_box.set_visible(needs_location); } catch (GLib.Error e) { }
+        try { main_content_container.set_visible(!needs_location); } catch (GLib.Error e) { }
     }
 
     private bool source_has_categories(NewsSource s) {
@@ -1367,6 +1484,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         switch (cat) {
             case "all": return "All Categories";
             case "myfeed": return "My Feed";
+            case "local_news": return "Local News";
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
@@ -1997,7 +2115,11 @@ public class NewsWindow : Adw.ApplicationWindow {
 
             int default_w = estimate_content_width();
             int default_h = 250;
-            set_placeholder_image(slide_image, default_w, default_h);
+            if (category_id == "local_news") {
+                set_local_placeholder_image(slide_image, default_w, default_h);
+            } else {
+                set_placeholder_image(slide_image, default_w, default_h);
+            }
             if (thumbnail_url != null && thumbnail_url.length > 0 &&
                 (thumbnail_url.has_prefix("http://") || thumbnail_url.has_prefix("https://"))) {
                 int multiplier = (prefs.news_source == NewsSource.REDDIT) ? 2 : 4;
@@ -2100,13 +2222,23 @@ public class NewsWindow : Adw.ApplicationWindow {
         overlay.set_child(image);
         var chip = build_category_chip(category_id);
         overlay.add_overlay(chip);
-    // Add source badge to normal card
-    NewsSource card_src = infer_source_from_url(url);
-    var card_badge = build_source_badge(card_src);
-    overlay.add_overlay(card_badge);
+    // Add source badge to normal card. For local feeds we don't show a
+    // provider badge because the feed may represent many sources or
+    // the source attribution is already present in the feed items.
+    if (category_id != "local_news") {
+        NewsSource card_src = infer_source_from_url(url);
+        var card_badge = build_source_badge(card_src);
+        overlay.add_overlay(card_badge);
+    }
 
-        // Always set placeholder first
-        set_placeholder_image(image, img_w, img_h);
+        // Always set placeholder first. For local-news articles use the
+        // app-local mono icon as the placeholder so cards visually match
+        // the Local News source affordance.
+        if (category_id == "local_news") {
+            set_local_placeholder_image(image, img_w, img_h);
+        } else {
+            set_placeholder_image(image, img_w, img_h);
+        }
         
         if (thumbnail_url != null && thumbnail_url.length > 0 && 
             (thumbnail_url.has_prefix("http://") || thumbnail_url.has_prefix("https://"))) {
@@ -2815,6 +2947,37 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
     }
 
+    // Local-news specific placeholder that uses the app-local mono icon
+    // (symbolic) and prefers a white variant in dark mode.
+    private void set_local_placeholder_image(Gtk.Picture image, int width, int height) {
+        try {
+            string? local_icon = find_data_file(GLib.Path.build_filename("icons", "symbolic", "local-mono.svg"));
+            if (local_icon == null) local_icon = find_data_file(GLib.Path.build_filename("icons", "local-mono.svg"));
+            string use_path = local_icon != null ? local_icon : null;
+            if (use_path != null) {
+                try {
+                    if (is_dark_mode()) {
+                        string? white_cand = find_data_file(GLib.Path.build_filename("icons", "symbolic", "local-mono-white.svg"));
+                        if (white_cand == null) white_cand = find_data_file(GLib.Path.build_filename("icons", "local-mono-white.svg"));
+                        if (white_cand != null) use_path = white_cand;
+                    }
+                } catch (GLib.Error e) { }
+
+                var pix = new Gdk.Pixbuf.from_file_at_size(use_path, width, height);
+                if (pix != null) {
+                    var tex = Gdk.Texture.for_pixbuf(pix);
+                    try { image.set_from_paintable(tex); } catch (GLib.Error e) { }
+                    return;
+                }
+            }
+        } catch (GLib.Error e) {
+            // fall through to generic placeholder
+        }
+
+        // Fallback: use the generic placeholder flow
+        set_placeholder_image(image, width, height);
+    }
+
     private void load_source_logo_placeholder(Gtk.Picture image, string logo_url, int width, int height) {
         new Thread<void*>("load-logo", () => {
             try {
@@ -3285,6 +3448,82 @@ public class NewsWindow : Adw.ApplicationWindow {
                 // No personalized categories selected: fall back to a sane default
                 myfeed_cats = { "general" };
             }
+        }
+
+        // Local News: if the user selected the Local News sidebar item,
+        // attempt to read per-user feeds from ~/.config/paperboy/local_feeds
+        // and fetch each feed URL with the RSS parser. This allows the
+        // rssFinder helper (a separate binary) to populate the file and
+        // the app to display the resulting feeds.
+        if (prefs.category == "local_news") {
+            string config_dir = GLib.Environment.get_user_config_dir() + "/paperboy";
+            string file_path = config_dir + "/local_feeds";
+
+            // If no local_feeds file exists, show a helpful label and stop.
+            if (!GLib.FileUtils.test(file_path, GLib.FileTest.EXISTS)) {
+                try { wrapped_set_label("Local News — No local feeds configured"); } catch (GLib.Error e) { }
+                hide_loading_spinner();
+                return;
+            }
+
+            string contents = "";
+            try { GLib.FileUtils.get_contents(file_path, out contents); } catch (GLib.Error e) { contents = ""; }
+            if (contents == null || contents.strip() == "") {
+                try { wrapped_set_label("Local News — No local feeds configured"); } catch (GLib.Error e) { }
+                hide_loading_spinner();
+                return;
+            }
+
+            // Clear UI and schedule per-feed fetches
+            try { wrapped_clear(); } catch (GLib.Error e) { }
+            ClearItemsFunc no_op_clear = () => { };
+            SetLabelFunc label_fn = (text) => {
+                if (current_search_query.length > 0) self_ref.category_label.set_text("Search Results: \"" + current_search_query + "\" in Local News");
+                else self_ref.category_label.set_text("Local News");
+            };
+
+            // Ensure the top-right source badge shows a generic/local affordance
+            // when we're displaying Local News (feeds may represent many sources).
+            try { self_ref.source_label.set_text("Local News"); } catch (GLib.Error e) { }
+            // Prefer a repo-local symbolic "local-mono" icon when available so the
+            // top-right logo matches the app's iconography. Fall back to the
+            // generic RSS symbolic icon if no local asset is found.
+            try {
+                string? local_icon = self_ref.find_data_file(GLib.Path.build_filename("icons", "symbolic", "local-mono.svg"));
+                if (local_icon == null) local_icon = self_ref.find_data_file(GLib.Path.build_filename("icons", "local-mono.svg"));
+                if (local_icon != null) {
+                    string use_path = local_icon;
+                    try {
+                        if (self_ref.is_dark_mode()) {
+                            string? white_cand = self_ref.find_data_file(GLib.Path.build_filename("icons", "symbolic", "local-mono-white.svg"));
+                            if (white_cand == null) white_cand = self_ref.find_data_file(GLib.Path.build_filename("icons", "local-mono-white.svg"));
+                            if (white_cand != null) use_path = white_cand;
+                        }
+                    } catch (GLib.Error e) { }
+                    var pix = new Gdk.Pixbuf.from_file_at_size(use_path, 32, 32);
+                    if (pix != null) {
+                        var tex = Gdk.Texture.for_pixbuf(pix);
+                        try { self_ref.source_logo.set_from_paintable(tex); } catch (GLib.Error e) { try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { } }
+                    } else {
+                        try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error e) { }
+                    }
+                } else {
+                    try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error e) { }
+                }
+            } catch (GLib.Error e) { try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { } }
+
+            string[] lines = contents.split("\n");
+            bool found_feed = false;
+            for (int i = 0; i < lines.length; i++) {
+                string u = lines[i].strip();
+                if (u.length == 0) continue;
+                found_feed = true;
+                RssParser.fetch_rss_url(u, "Local Feed", "Local News", "local_news", current_search_query, session, label_fn, no_op_clear, wrapped_add);
+            }
+            if (!found_feed) {
+                try { wrapped_set_label("Local News — No local feeds configured"); } catch (GLib.Error e) { }
+            }
+            return;
         }
         if (prefs.preferred_sources != null && prefs.preferred_sources.size > 1) {
             // Display a combined label and bundled monochrome logo for multi-source mode

@@ -33,6 +33,172 @@ public class PrefsDialog : GLib.Object {
         public Gtk.Label? hint;
         public bool alive = true;
     }
+
+    // Run the external `rssFinder` helper asynchronously with the given
+    // query (city name). When finished, present a small dialog with the
+    // result and refresh Local News in the parent NewsWindow if present.
+    private static void spawn_rssfinder_async(Gtk.Window parent, string query) {
+        new Thread<void*>("rssfinder-run", () => {
+            try {
+                string q = query.strip();
+                // If the query contains a comma ("City, State"), use only the city part
+                int cpos = q.index_of(",");
+                if (cpos > 0) q = q.substring(0, cpos).strip();
+
+                // Try to locate a repo-local `tools/rssFinder` by searching
+                // upward from the current working directory. This helps when
+                // the app is launched from a different CWD (e.g. via the
+                // desktop launcher) but the repository tree is nearby.
+                // Try a handful of likely repo-local and build locations before
+                // falling back to PATH. We avoid walking parents (some GLib
+                // helpers aren't exposed in the Vala bindings on all systems),
+                // and instead check common relative locations used during
+                // development.
+                string[] candidates = {
+                    "./tools/rssFinder",
+                    "tools/rssFinder",
+                    "../tools/rssFinder",
+                    "build/tools/rssFinder",
+                    "./build/tools/rssFinder",
+                    "/usr/local/bin/rssFinder",
+                    "/usr/bin/rssFinder"
+                };
+                string found = "";
+                foreach (var cand in candidates) {
+                    try {
+                        if (GLib.FileUtils.test(cand, GLib.FileTest.EXISTS | GLib.FileTest.IS_REGULAR)) {
+                            found = cand;
+                            break;
+                        }
+                    } catch (GLib.Error ee) { }
+                }
+                string prog;
+                SpawnFlags flags;
+                if (found.length > 0) {
+                    prog = found;
+                    flags = (SpawnFlags) 0; // execute explicit path
+                } else {
+                    prog = "rssFinder";
+                    flags = SpawnFlags.SEARCH_PATH; // fall back to PATH lookup
+                }
+
+                // Remove any existing local_feeds file so rssFinder's
+                // appended results start from a clean slate for this
+                // location change. rssFinder will create the config
+                // directory/file when it runs.
+                try {
+                    string config_dir_rm = GLib.Environment.get_user_config_dir() + "/paperboy";
+                    string file_path_rm = config_dir_rm + "/local_feeds";
+                    try {
+                        if (GLib.FileUtils.test(file_path_rm, GLib.FileTest.EXISTS)) {
+                            try { GLib.FileUtils.remove(file_path_rm); } catch (GLib.Error ee) { }
+                        }
+                    } catch (GLib.Error ee) { }
+                } catch (GLib.Error ee) { }
+
+                string[] argv = { prog, "--query", q };
+                string out = "";
+                string err = "";
+                int status = 0;
+                Process.spawn_sync(null, argv, null, flags, null, out out, out err, out status);
+
+                string message;
+                if (status == 0) {
+                    int count = 0;
+                    if (out != null) {
+                        string[] lines = out.split("\n");
+                        for (int i = 0; i < lines.length; i++) {
+                            if (lines[i].has_prefix("Found feed:")) count++;
+                        }
+                    }
+                    message = "Discovery finished. " + count.to_string() + " feeds reported.";
+                    if (err != null && err.length > 0) message += "\n\nErrors:\n" + err;
+                } else {
+                    message = "rssFinder failed (status " + status.to_string() + ").";
+                    if (err != null && err.length > 0) message += "\n\n" + err;
+                    if (out != null && out.length > 0) message += "\n\nOutput:\n" + out;
+                }
+
+                // Read the local_feeds file now that rssFinder finished so
+                // we can tell the user how many feeds were discovered and
+                // only start the potentially-long import when they dismiss
+                // the dialog (gives them a chance to cancel or be prepared).
+                string[] discovered_feeds = {};
+                try {
+                    string config_dir = GLib.Environment.get_user_config_dir() + "/paperboy";
+                    string file_path = config_dir + "/local_feeds";
+                    if (GLib.FileUtils.test(file_path, GLib.FileTest.EXISTS)) {
+                        string file_contents = "";
+                        try { GLib.FileUtils.get_contents(file_path, out file_contents); } catch (GLib.Error ee) { file_contents = ""; }
+                        if (file_contents != null && file_contents.strip() != "") {
+                            string[] lines = file_contents.split("\n");
+                            var tmp = new Gee.ArrayList<string>();
+                            for (int i = 0; i < lines.length; i++) {
+                                string u = lines[i].strip();
+                                if (u.length > 0) tmp.add(u);
+                            }
+                            discovered_feeds = new string[tmp.size];
+                            for (int i = 0; i < tmp.size; i++) discovered_feeds[i] = tmp.get(i);
+                        }
+                    }
+                } catch (GLib.Error ee) { }
+
+                Idle.add(() => {
+                    try {
+                        // Include discovered count in the message so the user
+                        // understands the scope of the import.
+                        string dlg_msg = message;
+                        int feed_count = discovered_feeds != null ? discovered_feeds.length : 0;
+                        dlg_msg += "\n\nFeeds found: " + feed_count.to_string();
+
+                        var dlg = new Adw.AlertDialog("Local Feed Discovery", dlg_msg);
+                        dlg.add_response("ok", "OK");
+                        dlg.set_default_response("ok");
+                        dlg.present(parent);
+
+                        // When the user dismisses the dialog, start the import
+                        // and refresh the Local News view. Use the dialog's
+                        // chooser API to detect the response.
+                        dlg.choose.begin(parent, null, (obj, res) => {
+                            try {
+                                string response = dlg.choose.end(res);
+                                if (response == "ok") {
+                                    try {
+                                        var win = parent as NewsWindow;
+                                        if (win != null) {
+                                            // Update overlay visibility first
+                                            try { win.update_local_news_ui(); } catch (GLib.Error e) { }
+                                            // Give the UI a short moment to settle before
+                                            // starting potentially many network fetches.
+                                            GLib.Timeout.add(800, () => {
+                                                try { win.fetch_news(); } catch (GLib.Error e) { }
+                                                return false;
+                                            });
+                                        }
+                                    } catch (GLib.Error e) { }
+                                }
+                            } catch (GLib.Error e) { }
+                        });
+                    } catch (GLib.Error e) { }
+                    return false;
+                });
+            } catch (GLib.Error e) {
+                // Capture the error message into a local so the idle closure
+                // does not reference the catch variable directly (which isn't
+                // accessible inside the nested lambda on some compiler versions).
+                string emsg = e.message;
+                Idle.add(() => {
+                    try {
+                        var dlg = new Adw.AlertDialog("Local Feed Discovery", "Error running rssFinder: " + emsg);
+                        dlg.add_response("ok", "OK");
+                        dlg.present(parent);
+                    } catch (GLib.Error ee) { }
+                    return false;
+                });
+            }
+            return null;
+        });
+    }
     
     public static void show_source_dialog(Gtk.Window parent) {
         // If an article preview is currently open in the main window, close it
@@ -1019,6 +1185,17 @@ public class PrefsDialog : GLib.Object {
                     p.user_location = last_detected_zip;
                     p.user_location_city = last_detected_city;
                     p.save_config();
+                    // If parent is NewsWindow, refresh its overlays immediately
+                    try {
+                        var parent_win = parent as NewsWindow;
+                        if (parent_win != null) {
+                            try { parent_win.update_personalization_ui(); } catch (GLib.Error e) { }
+                            try { parent_win.update_local_news_ui(); } catch (GLib.Error e) { }
+                            try { parent_win.fetch_news(); } catch (GLib.Error e) { }
+                            // Run rssFinder in background to populate ~/.config/paperboy/local_feeds
+                            try { spawn_rssfinder_async(parent, last_detected_city); } catch (GLib.Error e) { }
+                        }
+                    } catch (GLib.Error e) { }
                     try {
                         hint.set_use_markup(true);
                         hint.set_markup("Saved location: <b>" + GLib.Markup.escape_text(last_detected_city) + "</b>");
@@ -1062,6 +1239,17 @@ public class PrefsDialog : GLib.Object {
                         prefs.user_location = val;
                         prefs.user_location_city = "";
                         prefs.save_config();
+                        // Notify parent window (if present) so overlays update
+                        try {
+                            var parent_win2 = parent as NewsWindow;
+                            if (parent_win2 != null) {
+                                try { parent_win2.update_personalization_ui(); } catch (GLib.Error e) { }
+                                try { parent_win2.update_local_news_ui(); } catch (GLib.Error e) { }
+                                try { parent_win2.fetch_news(); } catch (GLib.Error e) { }
+                                // Run rssFinder in background for the newly saved free-form city
+                                try { spawn_rssfinder_async(parent, val); } catch (GLib.Error e) { }
+                            }
+                        } catch (GLib.Error e) { }
                     } catch (GLib.Error e) { /* best-effort only */ }
                     try { dialog.close(); } catch (GLib.Error e) { }
                     return;

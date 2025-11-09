@@ -103,7 +103,10 @@ public class NewsPreferences : GLib.Object {
                 foreach (var b in bb) if (b == cat) return true;
                 return false;
             default:
-                string[] def = { "general", "us", "technology", "science", "sports", "health", "entertainment", "politics", "lifestyle", "myfeed" };
+                // Include "local_news" as a top-level, non-category view so
+                // users can select it even when operating in single-source
+                // mode. Treat it similarly to "myfeed" for persistence checks.
+                string[] def = { "general", "us", "technology", "science", "sports", "health", "entertainment", "politics", "lifestyle", "myfeed", "local_news" };
                 foreach (var d in def) if (d == cat) return true;
                 return false;
         }
