@@ -22,6 +22,17 @@ using Soup;
 using Gdk;
 
 public class PrefsDialog : GLib.Object {
+    // Helper object to hold lookup-related widgets so we can safely
+    // take/release references and avoid capturing raw stack locals in
+    // async callbacks (which previously led to use-after-free crashes).
+    private class LookupHolder : GLib.Object {
+        public Gtk.Spinner? spinner;
+        public Gtk.Box? spinner_box;
+        public Gtk.Box? detected_row;
+        public Gtk.Label? det_lbl;
+        public Gtk.Label? hint;
+        public bool alive = true;
+    }
     
     public static void show_source_dialog(Gtk.Window parent) {
         // If an article preview is currently open in the main window, close it
@@ -925,12 +936,15 @@ public class PrefsDialog : GLib.Object {
         box.append(entry);
     box.append(suggestions_scroller);
         box.append(hint);
-        dialog.set_extra_child(box);
+    dialog.set_extra_child(box);
         // Track whether the dialog is still alive; if the user closes
         // the prefs dialog before an async ZIP lookup completes we
         // should avoid showing the inline detected row or a late
         // confirmation dialog (which is confusing). We set a flag on
-        // destroy and check it from the async callback.
+        // destroy and check it from the async callback. Later, after
+        // creating the spinner/detected widgets we also nullify those
+        // references on destroy so async callbacks don't call methods
+        // on freed GTK objects (which can cause SIGSEGV).
         bool dialog_alive = true;
         dialog.destroy.connect(() => {
             dialog_alive = false;
@@ -947,10 +961,71 @@ public class PrefsDialog : GLib.Object {
     // background lookup runs.
     try { dialog.present(parent); } catch (GLib.Error e) { }
 
-        // Note: ZIP-specific validation and online lookup removed for now.
-        // The dialog will accept any non-empty free-form location string and
-        // persist it directly. Previously the code attempted to validate
-        // numeric-looking values as ZIP codes and call an online geocoder.
+        // Create reusable UI pieces for ZIP lookup so the user can invoke
+        // searches repeatedly without recreating widgets each time.
+        // `detected_row` shows the detected city and a "Use detected" button.
+        var detected_row = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 8);
+        var det_lbl = new Gtk.Label("");
+        det_lbl.set_halign(Gtk.Align.START);
+        det_lbl.set_valign(Gtk.Align.CENTER);
+        det_lbl.set_hexpand(true);
+        var use_btn = new Gtk.Button.with_label("Use detected");
+        use_btn.set_valign(Gtk.Align.CENTER);
+        detected_row.append(det_lbl);
+        detected_row.append(use_btn);
+        try { detected_row.hide(); box.append(detected_row); } catch (GLib.Error e) { }
+
+    // Spinner row shown while lookup is in progress
+        var spinner_box = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 8);
+        spinner_box.set_margin_top(6);
+        spinner_box.set_margin_bottom(6);
+        try { spinner_box.set_halign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
+        try { spinner_box.set_valign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
+        var spinner = new Gtk.Spinner();
+        var spinner_label = new Gtk.Label("Searching...");
+        try { spinner.set_halign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
+        try { spinner_label.set_halign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
+        spinner_box.append(spinner);
+        spinner_box.append(spinner_label);
+        try { spinner_box.hide(); box.append(spinner_box); } catch (GLib.Error e) { }
+
+        // When the dialog is destroyed, null out local widget references
+        // so any outstanding async callbacks that capture these locals
+        // will see `null` and skip calling methods on freed objects.
+        dialog.destroy.connect(() => {
+            try { spinner = null; } catch (GLib.Error e) { }
+            try { spinner_box = null; } catch (GLib.Error e) { }
+            try { detected_row = null; } catch (GLib.Error e) { }
+            try { det_lbl = null; } catch (GLib.Error e) { }
+        });
+
+        // Search button: user explicitly starts a ZIP lookup. This allows
+        // repeated searches when the result isn't satisfactory.
+        var search_btn = new Gtk.Button.with_label("Search");
+        search_btn.set_valign(Gtk.Align.CENTER);
+        try { box.append(search_btn); } catch (GLib.Error e) { }
+
+        // Track the last detected values so the "Use detected" button can
+        // persist the correct ZIP and resolved city even after multiple
+        // searches or edits to the entry widget.
+        string last_detected_zip = "";
+        string last_detected_city = "";
+
+        // Wire the Use Detected button to save the last-detected city
+        use_btn.clicked.connect(() => {
+            try {
+                if (last_detected_city.length > 0) {
+                    var p = NewsPreferences.get_instance();
+                    p.user_location = last_detected_zip;
+                    p.user_location_city = last_detected_city;
+                    p.save_config();
+                    try {
+                        hint.set_use_markup(true);
+                        hint.set_markup("Saved location: <b>" + GLib.Markup.escape_text(last_detected_city) + "</b>");
+                    } catch (GLib.Error e) { }
+                }
+            } catch (GLib.Error e) { }
+        });
 
         dialog.choose.begin(parent, null, (obj, res) => {
             string response = dialog.choose.end(res);
@@ -959,6 +1034,7 @@ public class PrefsDialog : GLib.Object {
                 // Empty value clears the preference
                 if (val.length == 0) {
                     try { prefs.user_location = ""; prefs.save_config(); } catch (GLib.Error e) { }
+                    try { dialog.close(); } catch (GLib.Error e) { }
                     return;
                 }
 
@@ -970,128 +1046,16 @@ public class PrefsDialog : GLib.Object {
                 }
 
                 if (looks_numeric) {
-                    // Use async lookup to avoid blocking the UI thread while
-                    // the CSV is loaded or the nearest-city computation runs.
+                    // Don't automatically start a lookup on Save. Encourage
+                    // the user to press the explicit Search button so they
+                    // can repeat searches if the result isn't satisfactory.
                     try {
                         hint.set_use_markup(false);
-                        hint.set_text("Looking up ZIP…");
-
-                        // Copy the requested ZIP into a local variable so the
-                        // nested callbacks don't reference a stack-local that
-                        // may be invalid if the outer function returns.
-                        string zip_copy = val;
-
-                        // Re-present the prefs dialog so it remains visible
-                        // during the async lookup. The dialog's choose handler
-                        // runs after the dialog would normally close, so
-                        // explicitly present it again to allow inline UI
-                        // (spinner/detected_row) to appear inside the same
-                        // dialog as requested by the user.
-                        try {
-                            dialog_alive = true;
-                            dialog.present(parent);
-                        } catch (GLib.Error e) { }
-
-                        // Pre-create an inline "detected" row and append it now
-                        // while the dialog (and `box`) is still alive. We'll
-                        // keep it hidden until a lookup result arrives so we
-                        // don't need to call `box.append()` from the async
-                        // callback (which can crash if the dialog was closed).
-                        var detected_row = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 8);
-                        var det_lbl = new Gtk.Label("");
-                        det_lbl.set_halign(Gtk.Align.START);
-                        det_lbl.set_valign(Gtk.Align.CENTER);
-                        det_lbl.set_hexpand(true);
-                        var use_btn = new Gtk.Button.with_label("Use detected");
-                        use_btn.set_valign(Gtk.Align.CENTER);
-                        // The button's handler will read the label text at
-                        // click time to determine the detected city to save.
-                        use_btn.clicked.connect(() => {
-                            try {
-                                // Extract the plain city string from the label
-                                string lbl_text = det_lbl.get_text();
-                                // If it starts with "Detected: ", strip that
-                                string resolved_here = lbl_text;
-                                const string prefix = "Detected: ";
-                                if (lbl_text.has_prefix(prefix)) resolved_here = lbl_text.substring(prefix.length);
-                                if (resolved_here.length > 0) {
-                                    var p = NewsPreferences.get_instance();
-                                    p.user_location = zip_copy;
-                                    p.user_location_city = resolved_here;
-                                    p.save_config();
-                                    try {
-                                        hint.set_use_markup(true);
-                                        hint.set_markup("Saved location: <b>" + GLib.Markup.escape_text(resolved_here) + "</b>");
-                                    } catch (GLib.Error e) { }
-                                }
-                            } catch (GLib.Error e) { }
-                        });
-                        detected_row.append(det_lbl);
-                        detected_row.append(use_btn);
-                        try { detected_row.hide(); box.append(detected_row); } catch (GLib.Error e) { }
-
-                        // Instead of showing a separate progress dialog, append a
-                        // small spinner into the same prefs dialog `box` so the
-                        // user sees a single dialog that transitions from a
-                        // spinner into the detected option.
-                        var spinner_box = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 8);
-                        spinner_box.set_margin_top(6);
-                        spinner_box.set_margin_bottom(6);
-                        // Center the spinner_box within the dialog so the spinner
-                        // and the label appear centered horizontally.
-                        try { spinner_box.set_halign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
-                        try { spinner_box.set_valign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
-                        var spinner = new Gtk.Spinner();
-                        try { spinner.start(); } catch (GLib.Error e) { }
-                        try { spinner.set_halign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
-                        spinner_box.append(spinner);
-                        var spinner_label = new Gtk.Label("Searching...");
-                        try { spinner_label.set_halign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
-                        try { spinner_label.set_valign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
-                        spinner_box.append(spinner_label);
-                        try { box.append(spinner_box); } catch (GLib.Error e) { }
-
-                        // Ensure the prefs dialog is visible (it was presented
-                        // earlier) and allow the main loop to render the spinner
-                        // before we start the worker lookup.
-                        Idle.add(() => {
-                            try {
-                                ZipLookup.get_instance().lookup_async(zip_copy, (resolved) => {
-                                    // Runs on main loop.
-                                    try {
-                                        if (!dialog_alive) {
-                                            return;
-                                        }
-
-                                        // Hide and stop the spinner
-                                        try { spinner.stop(); } catch (GLib.Error e) { }
-                                        try { spinner_box.hide(); } catch (GLib.Error e) { }
-
-                                        if (resolved.length > 0) {
-                                            try {
-                                                det_lbl.set_text("Detected: " + resolved);
-                                                detected_row.show();
-                                            } catch (GLib.Error e) { }
-                                            // Offer the inline "Use detected" button
-                                            // (already appended to the same dialog).
-                                        } else {
-                                            try {
-                                                hint.set_use_markup(false);
-                                                hint.set_text("No local mapping found for this ZIP code.");
-                                            } catch (GLib.Error e) { }
-                                        }
-                                    } catch (GLib.Error e) { }
-                                });
-                            } catch (GLib.Error e) { }
-                            return false;
-                        });
-                    } catch (GLib.Error e) {
-                        var err = new Adw.AlertDialog("Lookup failed", GLib.Markup.escape_text(e.message));
-                        err.add_response("ok", "OK");
-                        err.set_default_response("ok");
-                        err.set_close_response("ok");
-                        err.present(null);
-                    }
+                        hint.set_text("ZIP entered — press Search to look up the nearest major city.");
+                        // Keep the dialog open; do not call dialog.close() so
+                        // the user can press Search without the dialog closing.
+                    } catch (GLib.Error e) { }
+                    return;
                 } else {
                     // Plain free-form city: persist and clear resolved city
                     try {
@@ -1099,7 +1063,13 @@ public class PrefsDialog : GLib.Object {
                         prefs.user_location_city = "";
                         prefs.save_config();
                     } catch (GLib.Error e) { /* best-effort only */ }
+                    try { dialog.close(); } catch (GLib.Error e) { }
+                    return;
                 }
+            } else {
+                // For any non-save response (cancel/close), close the dialog.
+                try { dialog.close(); } catch (GLib.Error e) { }
+                return;
             }
         });
 
@@ -1172,6 +1142,75 @@ public class PrefsDialog : GLib.Object {
                     return false; // one-shot
                 });
             } catch (GLib.Error e) { /* best-effort */ }
+        });
+
+        // Search button behavior: start a ZIP lookup when the user clicks
+        // the explicit Search button. This supports repeated searches.
+        search_btn.clicked.connect(() => {
+            try {
+                string txt = entry.get_text().strip();
+                bool looks_numeric_local = true;
+                for (uint i = 0; i < (uint) txt.length; i++) {
+                    char c = txt[i];
+                    if (!(c >= '0' && c <= '9') && c != '-' && c != ' ') { looks_numeric_local = false; break; }
+                }
+                if (!looks_numeric_local || txt.length == 0) {
+                    try { hint.set_use_markup(false); hint.set_text("Enter a ZIP code and press Search."); } catch (GLib.Error e) { }
+                    return;
+                }
+
+                // Prepare UI for lookup
+                try {
+                    hint.set_use_markup(false);
+                    hint.set_text("Looking up ZIP…");
+                    // Reset previous detection UI
+                    try { detected_row.hide(); } catch (GLib.Error e) { }
+                    last_detected_zip = txt;
+                    last_detected_city = "";
+                    // Show spinner
+                    try { spinner.start(); } catch (GLib.Error e) { }
+                    try { spinner_box.show(); } catch (GLib.Error e) { }
+                    // Ensure dialog is visible
+                    try { dialog_alive = true; dialog.present(parent); } catch (GLib.Error e) { }
+
+                    // Defer the actual lookup so spinner can render. Instead of
+                    // holding and unreffing widget pointers across threads (which
+                    // proved racy), ask ZipLookup for the resolved string and
+                    // then marshal UI work back to the main loop. The Idle
+                    // callback checks `dialog_alive` and widget nullability
+                    // before touching GTK objects.
+                    // Call lookup_async directly. `ZipLookup.lookup_async` will
+                    // invoke the provided callback on the main loop (it uses
+                    // Idle.add internally), so we do not need to wrap it in
+                    // another Idle. Keep UI updates simple and guarded.
+                    try {
+                        ZipLookup.get_instance().lookup_async(txt, (resolved) => {
+                            try {
+                                if (!dialog_alive) return;
+
+                                if (spinner != null) {
+                                    try { spinner.stop(); } catch (GLib.Error e) { }
+                                }
+                                if (spinner_box != null) {
+                                    try { spinner_box.hide(); } catch (GLib.Error e) { }
+                                }
+
+                                if (resolved.length > 0) {
+                                    last_detected_city = resolved;
+                                    if (det_lbl != null) {
+                                        try { det_lbl.set_text("Detected: " + resolved); } catch (GLib.Error e) { }
+                                    }
+                                    if (detected_row != null) {
+                                        try { detected_row.show(); } catch (GLib.Error e) { }
+                                    }
+                                } else {
+                                    try { hint.set_use_markup(false); hint.set_text("No local mapping found for this ZIP code."); } catch (GLib.Error e) { }
+                                }
+                            } catch (GLib.Error e) { }
+                        });
+                    } catch (GLib.Error e) { }
+                } catch (GLib.Error e) { }
+            } catch (GLib.Error e) { }
         });
     }
 }

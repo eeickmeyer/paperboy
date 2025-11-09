@@ -367,12 +367,22 @@ public class ZipLookup : GLib.Object {
             if (digits.length == 5 && zip_records.has_key(digits)) {
                 ZipRecord? zr = zip_records.get(digits);
                 if (zr != null && major_cities.size > 0) {
-                    double best_d = -1.0;
+                    // Prefer larger metropolitan centers even when they are
+                    // slightly farther away. Compute a simple score that
+                    // divides distance by (1 + population_in_millions). This
+                    // favors big cities (Dallas) over smaller nearby cities
+                    // (e.g., Garland) when the population difference is large.
+                    double best_score = -1.0;
                     MajorCity? best = null;
                     for (int i = 0; i < major_cities.size; i++) {
                         MajorCity mc = major_cities.get(i);
                         double d = haversine_km(zr.lat, zr.lng, mc.lat, mc.lng);
-                        if (best == null || d < best_d) { best = mc; best_d = d; }
+                        double pop_m = (double) mc.population / 1000000.0;
+                        double score = d / (1.0 + pop_m);
+                        if (best == null || score < best_score || (score == best_score && mc.population > best.population)) {
+                            best = mc;
+                            best_score = score;
+                        }
                     }
                     if (best != null) return best.name;
                 }
