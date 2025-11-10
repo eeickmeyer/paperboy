@@ -144,6 +144,210 @@ public class ImageParser {
 		});
 	}
 
+	// BBC-specific best-effort high-resolution image fetcher.
+	// BBC pages commonly use srcset/data-srcset, JSON-LD and lazy-loaded data-src/data-srcset
+	// attributes rather than OG tags. This function scans those locations and picks the
+	// largest candidate it can find, then calls `add_item` on the main loop to update
+	// the article entry in-place.
+	public static void fetch_bbc_highres_image(string article_url, Soup.Session session, AddItemFunc add_item, string current_category, string? source_name) {
+		new Thread<void*>("fetch-bbc-image", () => {
+			try {
+				var msg = new Soup.Message("GET", article_url);
+				msg.request_headers.append("User-Agent", "Mozilla/5.0 (Linux; rv:91.0) Gecko/20100101 Firefox/91.0");
+				session.send_message(msg);
+
+				if (msg.status_code != 200) return null;
+				string body = (string) msg.response_body.flatten().data;
+
+				string? best = null;
+
+				// 1) Try to find image in JSON-LD blocks (application/ld+json)
+				var jsonld_regex = new Regex("<script[^>]*type=\\\"application/ld\\+json\\\"[^>]*>([\\s\\S]*?)</script>", RegexCompileFlags.DEFAULT);
+				MatchInfo mjson;
+				if (jsonld_regex.match(body, 0, out mjson)) {
+					do {
+						string j = mjson.fetch(1);
+						// Heuristics: look for "image": "url" or "image": { "url": "..." } or array
+						var img_simple = new Regex("\\\"image\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"", RegexCompileFlags.DEFAULT);
+						MatchInfo ms;
+						if (img_simple.match(j, 0, out ms)) {
+							best = ms.fetch(1);
+							break;
+						}
+						var img_obj = new Regex("\\\"image\\\"\\s*:\\s*\\{[\\s\\S]*?\\\\\"url\\\\\"\\s*:\\s*\\\\\"([^\\\\\"]+)\\\\\"", RegexCompileFlags.DEFAULT);
+						if (img_obj.match(j, 0, out ms)) {
+							best = ms.fetch(1);
+							break;
+						}
+						var img_arr = new Regex("\\\"image\\\"\\s*:\\s*\\[\\s\\S]*?\\\\\"([^\\\\\"]+)\\\\\"", RegexCompileFlags.DEFAULT);
+						if (img_arr.match(j, 0, out ms)) {
+							best = ms.fetch(1);
+							break;
+						}
+					} while (mjson.next());
+				}
+
+				// 2) If no JSON-LD result, parse srcset/data-srcset and data-src attributes across the page
+				if (best == null) {
+					var srcset_regex = new Regex("(srcset|data-srcset|data-src|src)=[\"']([^\"']+)[\"']", RegexCompileFlags.DEFAULT);
+					MatchInfo ms2;
+					if (srcset_regex.match(body, 0, out ms2)) {
+						string candidate = null;
+						do {
+							string attr = ms2.fetch(1).down();
+							string val = ms2.fetch(2);
+							if (attr.has_suffix("srcset") || attr.has_suffix("data-srcset")) {
+								string chosen = parse_srcset_select_largest(val);
+								if (chosen != null && chosen.length > 0) candidate = chosen;
+							} else {
+								// src or data-src
+								if (!val.has_prefix("data:")) candidate = val;
+							}
+							if (candidate != null) {
+								best = candidate;
+								break;
+							}
+						} while (ms2.next());
+					}
+				}
+
+				// 3) Fallback: look for large images hosted on BBC image CDN (ichef.bbci.co.uk)
+				if (best == null) {
+					var bbc_img = new Regex("https?://ichef\\.bbci\\.co\\.[a-z]+/[^\"'\\s]+", RegexCompileFlags.DEFAULT);
+					MatchInfo mb;
+					if (bbc_img.match(body, 0, out mb)) {
+						best = mb.fetch(0);
+					}
+				}
+
+				if (best != null) {
+					// Clean up simple encodings
+					best = best.replace("&amp;", "&");
+					if (best.has_prefix("//")) best = "https:" + best;
+					// Prefer https
+					if (best.has_prefix("http:") && !best.has_prefix("https:")) best = "https:" + best.substring(5);
+					string final_url = best;
+					if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) {
+						warning("fetch_bbc_highres_image: chosen candidate=%s for article=%s", final_url, article_url);
+					}
+					Idle.add(() => {
+						add_item(article_url, article_url, final_url, current_category, source_name);
+						return false;
+					});
+				}
+			} catch (GLib.Error e) {
+				// ignore
+			}
+			return null;
+		});
+	}
+
+	// Helper: parse a srcset string and return the URL with the largest width descriptor if present,
+	// otherwise return the last URL.
+	private static string? parse_srcset_select_largest(string srcset) {
+		try {
+			string[] parts = srcset.split(",");
+			int best_w = -1;
+			string? best_url = null;
+			foreach (var p in parts) {
+				string t = p.strip();
+				if (t.length == 0) continue;
+				// url [descriptor]
+				int space_idx = t.index_of(" ");
+				string url = space_idx > 0 ? t.substring(0, space_idx) : t;
+				string desc = space_idx > 0 ? t.substring(space_idx + 1).strip() : "";
+				int w = -1;
+				if (desc.has_suffix("w")) {
+					try { w = int.parse(desc.substring(0, desc.length - 1)); } catch (Error e) { w = -1; }
+				}
+				if (w > best_w) { best_w = w; best_url = url; }
+				if (best_w == -1) best_url = url; // fallback to last seen
+			}
+			if (best_url != null) {
+				best_url = best_url.replace("&amp;", "&");
+				if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) {
+					warning("parse_srcset_select_largest: srcset='%s' -> chosen=%s", srcset, best_url);
+				}
+				return best_url;
+			}
+		} catch (Error e) {
+			return null;
+		}
+		return null;
+	}
+
+	// Try to normalize BBC CDN image URLs to a larger variant when possible.
+	// This uses a few safe heuristics:
+	// - Replace "/news/<num>/" with "/news/1024/" if present
+	// - Replace "/<w>x<h>/" path segments with "/1024x576/"
+	// - Strip query parameters that constrain width/size
+	// Returns the original URL if no changes are made or on error.
+	public static string normalize_bbc_image_url(string url) {
+		try {
+			string u = url.replace("&amp;", "&");
+			if (u.has_prefix("//")) u = "https:" + u;
+			if (u.has_prefix("http:") && !u.has_prefix("https:")) u = "https:" + u.substring(5);
+			// If the URL embeds a numeric news size segment, replace it with 1024
+			var re_news_size = new Regex("/news/\\d+/", RegexCompileFlags.DEFAULT);
+			MatchInfo m;
+			if (re_news_size.match(u, 0, out m)) {
+				u = re_news_size.replace(u, -1, 0, "/news/1024/");
+			}
+
+			// If an explicit WxH segment exists (e.g. /320x180/), prefer a larger ratio
+			var re_xy = new Regex("/\\d+x\\d+/(?!cpsprodpb)", RegexCompileFlags.DEFAULT);
+			if (re_xy.match(u, 0, out m)) {
+				u = re_xy.replace(u, -1, 0, "/1024x576/");
+			}
+
+			// BBC-specific: common IChef patterns include /ace/standard/<size>/ or /ace/thumbnail/<size>/
+			var re_ace_standard = new Regex("/ace/standard/\\d+/", RegexCompileFlags.DEFAULT);
+			if (re_ace_standard.match(u, 0, out m)) {
+				u = re_ace_standard.replace(u, -1, 0, "/ace/standard/1024/");
+			}
+
+			var re_ace_thumb = new Regex("/ace/(thumbnail|thumb|standard)/\\d+/", RegexCompileFlags.DEFAULT);
+			if (re_ace_thumb.match(u, 0, out m)) {
+				u = re_ace_thumb.replace(u, -1, 0, "/ace/standard/1024/");
+			}
+
+			// Some BBC URLs include /resize/<w>x<h>/ or /preview/<size>/ — rewrite to a larger resize when present
+			var re_resize = new Regex("/(resize|preview)/\\d+x\\d+/(?!cpsprodpb)", RegexCompileFlags.DEFAULT);
+			if (re_resize.match(u, 0, out m)) {
+				u = re_resize.replace(u, -1, 0, "/resize/1024x576/");
+			}
+
+			// Insert a 1024 segment before cpsprodpb if present but no size segment exists
+			var re_cps = new Regex("/news/(?:[^/]+/)*cpsprodpb/", RegexCompileFlags.DEFAULT);
+			if (re_cps.match(u, 0, out m)) {
+				// If we don't already contain /1024/ near the start, try adding it after /news/
+				var re_news = new Regex("/news/(?!1024/)", RegexCompileFlags.DEFAULT);
+				if (re_news.match(u, 0, out m)) {
+					u = re_news.replace(u, -1, 0, "/news/1024/");
+				}
+			}
+
+			// Some paths contain explicit small tokens; replace common "thumb"/"small"/"thumbnail" segments
+			var re_small = new Regex("/(thumb|thumbnail|small|crop)/", RegexCompileFlags.DEFAULT);
+			if (re_small.match(u, 0, out m)) {
+				u = re_small.replace(u, -1, 0, "/1024x576/");
+			}
+
+			// Strip query parameters that constrain size (e.g., ?width=, ?w=)
+			int q = u.index_of("?");
+			if (q >= 0) u = u.substring(0, q);
+
+			// Final sanitization
+			if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) {
+				warning("normalize_bbc_image_url: input=%s output=%s", url, u);
+			}
+
+			return u;
+		} catch (GLib.Error e) {
+			return url;
+		}
+	}
+
 	private static string strip_html(string input) {
 		var regex = new Regex("<[^>]+>", RegexCompileFlags.DEFAULT);
 		return regex.replace(input, -1, 0, "");

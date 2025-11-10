@@ -212,12 +212,12 @@ public class ArticleWindow : GLib.Object {
                 // Continue searching to prefer a Paperboy.NewsArticle published time if present
             }
         }
-    // Choose a sensible display name for the source. Prefer an explicit
-    // per-item source when present. Otherwise, derive a friendly name
-    // from the inferred NewsSource. If inference fell back to the
-    // user's default (e.g. NewsPreferences.news_source) while multiple
-    // preferred sources are enabled, try to derive a host-based name
-    // from the article URL so we don't incorrectly show a specific
+        // Choose a sensible display name for the source. Prefer an explicit
+        // per-item source when present. Otherwise, derive a friendly name
+        // from the inferred NewsSource. If inference fell back to the
+        // user's default (e.g. NewsPreferences.news_source) while multiple
+        // preferred sources are enabled, try to derive a host-based name
+        // from the article URL so we don't incorrectly show a specific
     // provider like "The Guardian".
         string display_source = null;
         if (explicit_source_name != null && explicit_source_name.length > 0) {

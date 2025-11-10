@@ -30,7 +30,8 @@ public class RssParser {
         string current_search_query,
         SetLabelFunc set_label,
         ClearItemsFunc clear_items,
-        AddItemFunc add_item
+        AddItemFunc add_item,
+        Soup.Session session
     ) {
         try {
             Xml.Doc* doc = Xml.Parser.parse_memory(body, (int) body.length);
@@ -40,6 +41,9 @@ public class RssParser {
             }
 
             var items = new Gee.ArrayList<Gee.ArrayList<string?>>();
+            // Respect runtime feature flag to enable/disable BBC-specific extraction/normalization.
+            bool bbc_enabled = false;
+            try { string? env = GLib.Environment.get_variable("PAPERBOY_ENABLE_BBC_EXTRACT"); if (env == null) bbc_enabled = true; else bbc_enabled = env != "0"; } catch (GLib.Error e) { bbc_enabled = true; }
             Xml.Node* root = doc->get_root_element();
             for (Xml.Node* ch = root->children; ch != null; ch = ch->next) {
                 if (ch->type == Xml.ElementType.ELEMENT_NODE && (ch->name == "channel" || ch->name == "feed")) {
@@ -139,6 +143,15 @@ public class RssParser {
                             }
                             if (title != null && link != null) {
                                 var row = new Gee.ArrayList<string?>();
+                                // If the feed provided a BBC thumbnail, try normalizing it to a larger CDN variant
+                                if (thumb != null && bbc_enabled) {
+                                    string thumb_l = thumb.down();
+                                    if (thumb_l.contains("bbc.") || thumb_l.contains("bbci.co.uk")) {
+                                        string before = thumb;
+                                        thumb = Tools.ImageParser.normalize_bbc_image_url(thumb);
+                                        try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) warning("rssParser: normalized thumb %s -> %s", before, thumb); } catch (GLib.Error e) { }
+                                    }
+                                }
                                 row.add(title);
                                 row.add(link);
                                 row.add(thumb);
@@ -149,7 +162,7 @@ public class RssParser {
                 }
             }
 
-            Idle.add(() => {
+                Idle.add(() => {
                 if (current_search_query.length > 0) {
                     set_label(@"Search Results: \"$(current_search_query)\" in $(category_name) — $(source_name)");
                 } else {
@@ -162,6 +175,34 @@ public class RssParser {
                 }
                 return false;
             });
+
+                // Background: for BBC links, try to fetch higher-resolution images using
+                // `Tools.ImageParser.fetch_bbc_highres_image`. Limit to a small number to
+                // avoid hammering article pages. This background pass is gated by the
+                // PAPERBOY_ENABLE_BBC_EXTRACT feature flag.
+                if (bbc_enabled) {
+                    new Thread<void*>("bbc-image-upgrade", () => {
+                        try {
+                            int upgrades = 0;
+                            foreach (var row in items) {
+                                if (upgrades >= 8) break;
+                                string? link = row[1];
+                                string? thumb = row[2];
+                                if (link == null) continue;
+                                string link_l = link.down();
+                                if ((link_l.contains("bbc.") || link_l.contains("bbci.co.uk"))) {
+                                    // If there's no thumbnail or it looks like a tiny thumbnail, try upgrade
+                                    if (thumb == null || thumb.length < 50) {
+                                        Tools.ImageParser.fetch_bbc_highres_image(link, session, add_item, category_id, source_name);
+                                        upgrades++;
+                                    }
+                                }
+                            }
+                        } catch (GLib.Error e) {
+                        }
+                        return null;
+                    });
+                }
         } catch (GLib.Error e) {
             warning("RSS parse/display error: %s", e.message);
         }
@@ -188,7 +229,7 @@ public class RssParser {
                     return null;
                 }
                 string body = (string) msg.response_body.flatten().data;
-                parse_rss_and_display(body, source_name, category_name, category_id, current_search_query, set_label, clear_items, add_item);
+                parse_rss_and_display(body, source_name, category_name, category_id, current_search_query, set_label, clear_items, add_item, session);
             } catch (GLib.Error e) {
                 warning("RSS fetch error: %s", e.message);
             }

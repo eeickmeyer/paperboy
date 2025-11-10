@@ -1128,14 +1128,14 @@ public class NewsWindow : Adw.ApplicationWindow {
         columns_row.set_hexpand(true);
         columns_row.set_vexpand(true);
         columns_row.set_homogeneous(true); // equal column widths
-    rebuild_columns(3);
-    // Clear any mappings from previous view; widgets were just removed
-    // and mappings like `url_to_picture` / `hero_requests` would point
-    // to widgets that are no longer in the UI. Keep maps in sync to
-    // avoid treating removed pictures as "existing" and updating
-    // invisible widgets (which leaves the view blank on revisit).
-    url_to_picture.clear();
-    hero_requests.clear();
+        rebuild_columns(3);
+        // Clear any mappings from previous view; widgets were just removed
+        // and mappings like `url_to_picture` / `hero_requests` would point
+        // to widgets that are no longer in the UI. Keep maps in sync to
+        // avoid treating removed pictures as "existing" and updating
+        // invisible widgets (which leaves the view blank on revisit).
+        url_to_picture.clear();
+        hero_requests.clear();
         main_content_container.append(columns_row);
         
         // Create an overlay container for main content and loading spinner
