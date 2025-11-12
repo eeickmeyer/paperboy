@@ -46,6 +46,12 @@ public class NewsSources {
         ClearItemsFunc clear_items,
         AddItemFunc add_item
     ) {
+        // Special handling: if the UI requested the unified "frontpage",
+        // fetch aggregated frontpage articles from our Paperboy backend API.
+        if (current_category == "frontpage") {
+            fetch_paperboy_frontpage(current_search_query, session, set_label, clear_items, add_item);
+            return;
+        }
         // Handle "all" category by fetching from multiple categories for other sources
         if (current_category == "all") {
             fetch_all_categories(source, current_search_query, session, set_label, clear_items, add_item);
@@ -206,6 +212,92 @@ public class NewsSources {
         }
     }
 
+    // Fetch the unified "frontpage" from the Paperboy backend API.
+    // The backend is expected to return a JSON array of article objects or
+    // an object with an "articles" array. We tolerate a few common field
+    // names when mapping into the UI (title, url/link, thumbnail/image).
+    private static void fetch_paperboy_frontpage(
+        string current_search_query,
+        Soup.Session session,
+        SetLabelFunc set_label,
+        ClearItemsFunc clear_items,
+        AddItemFunc add_item
+    ) {
+        new Thread<void*>("fetch-frontpage-api", () => {
+            try {
+                string base_url = "https://paperboybackend.onrender.com";
+                string url = base_url + "/news/frontpage";
+                var msg = new Soup.Message("GET", url);
+                msg.request_headers.append("User-Agent", "paperboy/0.1");
+                session.send_message(msg);
+                if (msg.status_code != 200) {
+                    warning("Paperboy API HTTP error: %u", msg.status_code);
+                    Idle.add(() => {
+                        set_label("Paperboy: Error loading frontpage");
+                        return false;
+                    });
+                    return null;
+                }
+                string body = (string) msg.response_body.flatten().data;
+
+                var parser = new Json.Parser();
+                parser.load_from_data(body);
+                var root = parser.get_root();
+
+                Json.Array articles = null;
+                if (root.get_node_type() == Json.NodeType.ARRAY) {
+                    articles = root.get_array();
+                } else {
+                    var obj = root.get_object();
+                    if (obj.has_member("articles")) {
+                        articles = obj.get_array_member("articles");
+                    } else if (obj.has_member("data")) {
+                        var data = obj.get_object_member("data");
+                        if (data.has_member("articles"))
+                            articles = data.get_array_member("articles");
+                    }
+                }
+
+                if (articles == null) {
+                    // Unexpected response shape
+                    return null;
+                }
+
+                // Note: do simple substring filtering for search queries (case-sensitive).
+
+                Idle.add(() => {
+                    if (current_search_query.length > 0) {
+                        set_label(@"Search Results: \"$(current_search_query)\" in The Frontpage — Paperboy");
+                    } else {
+                        set_label("The Frontpage — Paperboy");
+                    }
+                    clear_items();
+                    uint len = articles.get_length();
+                    for (uint i = 0; i < len; i++) {
+                        var art = articles.get_element(i).get_object();
+                        string title = art.has_member("title") ? art.get_string_member("title") : (art.has_member("headline") ? art.get_string_member("headline") : "No title");
+                        string article_url = art.has_member("url") ? art.get_string_member("url") : (art.has_member("link") ? art.get_string_member("link") : "");
+                        string? thumbnail = null;
+                        if (art.has_member("thumbnail")) thumbnail = art.get_string_member("thumbnail");
+                        else if (art.has_member("image")) thumbnail = art.get_string_member("image");
+                        else if (art.has_member("image_url")) thumbnail = art.get_string_member("image_url");
+                        string source_name = "Paperboy API";
+                        if (art.has_member("source")) source_name = art.get_string_member("source");
+                        else if (art.has_member("provider")) source_name = art.get_string_member("provider");
+
+                        if (current_search_query.length > 0) {
+                            if (!title.contains(current_search_query) && !article_url.contains(current_search_query)) continue;
+                        }
+
+                        add_item(title, article_url, thumbnail, "frontpage", source_name);
+                    }
+                    return false;
+                });
+            } catch (GLib.Error e) { warning("Paperboy frontpage fetch error: %s", e.message); }
+            return null;
+        });
+    }
+
     // Helpers
     // Utility to strip HTML tags from a string (moved here to live with other helpers)
     private static string strip_html(string input) {
@@ -215,6 +307,7 @@ public class NewsSources {
     }
     private static string category_display_name(string cat) {
         switch (cat) {
+            case "frontpage": return "The Frontpage";
             case "all": return "All Categories";
             case "myfeed": return "My Feed";
             case "general": return "World News";
@@ -909,6 +1002,4 @@ public class NewsSources {
         }
         RssParser.fetch_rss_url(url, "WSJ", category_display_name(current_category), current_category, current_search_query, session, set_label, clear_items, add_item);
     }
-
-
 }

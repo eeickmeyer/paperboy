@@ -420,6 +420,9 @@ public class NewsWindow : Adw.ApplicationWindow {
             case "all":
                 candidates = { "view-list-symbolic", "applications-all-symbolic", "folder-symbolic" };
                 break;
+            case "frontpage":
+                candidates = { "go-home-symbolic", "applications-home-symbolic", "home-symbolic" };
+                break;
             case "general":
                 candidates = { "globe-symbolic", "emblem-web-symbolic" };
                 break;
@@ -566,7 +569,9 @@ public class NewsWindow : Adw.ApplicationWindow {
             if (_dbg2 != null && _dbg2.length > 0) append_debug_log("rebuild_sidebar: removed_rows=" + removed.to_string());
         } catch (GLib.Error e) { }
 
-    // Place "My Feed" above the Categories header, then include the "All Categories" option
+    // Place "The Frontpage" and "My Feed" above the Categories header,
+    // then include the "All Categories" option
+    sidebar_add_row("The Frontpage", "frontpage", prefs.category == "frontpage");
     sidebar_add_row("My Feed", "myfeed", prefs.category == "myfeed");
     // Local News is a special sidebar item that is not part of Categories
     sidebar_add_row("Local News", "local_news", prefs.category == "local_news");
@@ -1006,7 +1011,9 @@ public class NewsWindow : Adw.ApplicationWindow {
     sidebar_list.set_selection_mode(SelectionMode.SINGLE);
     sidebar_list.set_activate_on_single_click(true);
 
-    // Place "My Feed" above the Categories header, then include the "All Categories" option
+    // Place "The Frontpage" and "My Feed" above the Categories header,
+    // then include the "All Categories" option
+    sidebar_add_row("The Frontpage", "frontpage", prefs.category == "frontpage");
     sidebar_add_row("My Feed", "myfeed", prefs.category == "myfeed");
     // Local News is a special sidebar item that is not part of Categories
     sidebar_add_row("Local News", "local_news", prefs.category == "local_news");
@@ -1022,6 +1029,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         sidebar_add_row("Entertainment", "entertainment", prefs.category == "entertainment");
         sidebar_add_row("Politics", "politics", prefs.category == "politics");
         sidebar_add_row("Lifestyle", "lifestyle", prefs.category == "lifestyle");
+
 
         sidebar_scrolled = new Gtk.ScrolledWindow();
         sidebar_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
@@ -1583,6 +1591,7 @@ public class NewsWindow : Adw.ApplicationWindow {
 
     private string category_display_name_for(string cat) {
         switch (cat) {
+            case "frontpage": return "The Frontpage";
             case "all": return "All Categories";
             case "myfeed": return "My Feed";
             case "local_news": return "Local News";
