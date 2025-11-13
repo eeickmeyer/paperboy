@@ -178,9 +178,11 @@ public class NewsPreferences : GLib.Object {
             // handle combining categories). Only enforce compatibility when
             // operating in legacy/single-source mode.
             if (preferred_sources == null || preferred_sources.size <= 1) {
-                // Allow the special "myfeed" category to persist when the
-                // personalized feed is enabled even in single-source mode.
-                if (!(category == "myfeed" && personalized_feed_enabled)) {
+                // Allow the special "myfeed" and "frontpage" categories to
+                // persist when selected even in single-source mode. These
+                // are UI-level aggregated views (not tied to a specific
+                // provider) and should not be coerced to "all".
+                if (!(category == "myfeed" && personalized_feed_enabled) && category != "frontpage") {
                     if (!category_valid_for_source(news_source, category)) {
                         // Use the neutral "all" view as a safe persisted default
                         category = "all";

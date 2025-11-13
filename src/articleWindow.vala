@@ -369,15 +369,12 @@ public class ArticleWindow : GLib.Object {
                                 if (width > target_w || height > target_h) {
                                     double scale = double.min((double) target_w / width, (double) target_h / height);
                                     int new_width = (int)(width * scale);
+                                    if (new_width < 1) new_width = 1;
                                     int new_height = (int)(height * scale);
-                                    // Ensure minimum quality - don't scale below reasonable size
-                                    if (new_width >= 64 && new_height >= 64) {
-                                        // Use HYPER interpolation for best quality when scaling down
-                                        pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.HYPER);
-                                        print("Scaled to: %dx%d\n", new_width, new_height);
-                                    } else {
-                                        print("Keeping original size - would scale too small\n");
-                                    }
+                                    if (new_height < 1) new_height = 1;
+                                    // Scale down even for small targets so UI badges/layouts receive appropriately-sized images
+                                    pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.HYPER);
+                                    print("Scaled to: %dx%d\n", new_width, new_height);
                                 } else {
                                     print("Keeping original size for better quality\n");
                                 }

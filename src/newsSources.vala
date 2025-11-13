@@ -275,21 +275,110 @@ public class NewsSources {
                     uint len = articles.get_length();
                     for (uint i = 0; i < len; i++) {
                         var art = articles.get_element(i).get_object();
-                        string title = art.has_member("title") ? art.get_string_member("title") : (art.has_member("headline") ? art.get_string_member("headline") : "No title");
-                        string article_url = art.has_member("url") ? art.get_string_member("url") : (art.has_member("link") ? art.get_string_member("link") : "");
-                        string? thumbnail = null;
-                        if (art.has_member("thumbnail")) thumbnail = art.get_string_member("thumbnail");
-                        else if (art.has_member("image")) thumbnail = art.get_string_member("image");
-                        else if (art.has_member("image_url")) thumbnail = art.get_string_member("image_url");
-                        string source_name = "Paperboy API";
-                        if (art.has_member("source")) source_name = art.get_string_member("source");
-                        else if (art.has_member("provider")) source_name = art.get_string_member("provider");
+                            string title = json_get_string_safe(art, "title") != null ? json_get_string_safe(art, "title") : (json_get_string_safe(art, "headline") != null ? json_get_string_safe(art, "headline") : "No title");
+                            string article_url = json_get_string_safe(art, "url") != null ? json_get_string_safe(art, "url") : (json_get_string_safe(art, "link") != null ? json_get_string_safe(art, "link") : "");
+                            string? thumbnail = null;
+                            if (json_get_string_safe(art, "thumbnail") != null) thumbnail = json_get_string_safe(art, "thumbnail");
+                            else if (json_get_string_safe(art, "image") != null) thumbnail = json_get_string_safe(art, "image");
+                            else if (json_get_string_safe(art, "image_url") != null) thumbnail = json_get_string_safe(art, "image_url");
+                            // Prefer a nested `source` object when present (many backends
+                            // return provider metadata there). Fall back to the old
+                            // top-level fields for compatibility.
+                            string source_name = "Paperboy API";
+                            string? logo_url = null;
+                            if (art.has_member("source")) {
+                                var src_node = art.get_member("source");
+                                if (src_node != null && src_node.get_node_type() == Json.NodeType.OBJECT) {
+                                    var src_obj = src_node.get_object();
+                                    // typical fields: name, title, url, logo_url
+                                    string? n = json_get_string_safe(src_obj, "name");
+                                    if (n == null) n = json_get_string_safe(src_obj, "title");
+                                    if (n != null) source_name = n;
+                                    // logo fields on the nested source object
+                                    if (json_get_string_safe(src_obj, "logo_url") != null) logo_url = json_get_string_safe(src_obj, "logo_url");
+                                    else if (json_get_string_safe(src_obj, "logo") != null) logo_url = json_get_string_safe(src_obj, "logo");
+                                    else if (json_get_string_safe(src_obj, "favicon") != null) logo_url = json_get_string_safe(src_obj, "favicon");
+                                    // If provider included a URL field, prefer it as a display hint
+                                    if (source_name == null || source_name.length == 0) {
+                                        string? provurl = json_get_string_safe(src_obj, "url");
+                                        if (provurl != null) {
+                                            string inferred = infer_display_name_from_url(provurl);
+                                            if (inferred.length > 0) source_name = inferred;
+                                        }
+                                    }
+                                } else {
+                                    // `source` exists but is not an object: try as string
+                                    string? s = json_get_string_safe(art, "source");
+                                    if (s != null) source_name = s;
+                                }
+                            } else {
+                                // legacy/top-level provider fields
+                                if (json_get_string_safe(art, "source") != null) source_name = json_get_string_safe(art, "source");
+                                else if (json_get_string_safe(art, "provider") != null) source_name = json_get_string_safe(art, "provider");
+                            }
+
+                            // If backend returned a generic placeholder (or nothing),
+                            // try to infer a sensible display name from the article URL
+                            if (source_name == null || source_name.length == 0 || source_name == "Paperboy API") {
+                                string inferred = infer_display_name_from_url(article_url);
+                                if (inferred != null && inferred.length > 0) source_name = inferred;
+                            }
+
+                            // Also check for logo fields at the article root if not found
+                            if (logo_url == null) {
+                                if (json_get_string_safe(art, "logo") != null) logo_url = json_get_string_safe(art, "logo");
+                                else if (json_get_string_safe(art, "favicon") != null) logo_url = json_get_string_safe(art, "favicon");
+                                else if (json_get_string_safe(art, "logo_url") != null) logo_url = json_get_string_safe(art, "logo_url");
+                                else if (json_get_string_safe(art, "site_icon") != null) logo_url = json_get_string_safe(art, "site_icon");
+                            }
+
+                        // Normalize common forms returned by various backends:
+                        // - protocol-relative URLs (//example.com/foo.png) -> https://example.com/foo.png
+                        // - trim whitespace
+                        if (logo_url != null) {
+                            logo_url = logo_url.strip();
+                            if (logo_url.has_prefix("//")) {
+                                // Prefer https for protocol-relative assets
+                                logo_url = "https:" + logo_url;
+                            }
+                        }
+
+                        // If we have a logo URL, encode it into the source_name using
+                        // a small delimiter so the UI can detect and download/cache it.
+                        // Format: "Display Name||<logo_url>". This avoids changing the
+                        // AddItemFunc signature across the codebase.
+                        string display_source = source_name;
+                        if (logo_url != null && logo_url.length > 0) {
+                            display_source = source_name + "||" + logo_url;
+                        }
+
+                        // Write a concise per-article debug line so we can inspect
+                        // what the backend provided and confirm logos are parsed.
+                        try {
+                            string path = "/tmp/paperboy-debug.log";
+                            string old = "";
+                            try { GLib.FileUtils.get_contents(path, out old); } catch (GLib.Error e) { old = ""; }
+                            string safe_title = title.replace("\n", " ").replace("\"", "'");
+                            string safe_display = display_source != null ? display_source.replace("\n", " ").replace("\"", "'") : "<null>";
+                            string safe_logo = logo_url != null ? logo_url : "<null>";
+                            string safe_url = article_url != null ? article_url : "<null>";
+                            string line = "frontpage-parse: idx=%u title=\"%s\" source=\"%s\" logo=\"%s\" url=\"%s\"".printf(i, safe_title, safe_display, safe_logo, safe_url);
+                            try { GLib.FileUtils.set_contents(path, old + line + "\n"); } catch (GLib.Error e) { }
+                        } catch (GLib.Error e) { }
 
                         if (current_search_query.length > 0) {
                             if (!title.contains(current_search_query) && !article_url.contains(current_search_query)) continue;
                         }
 
-                        add_item(title, article_url, thumbnail, "frontpage", source_name);
+                        // Debug: write parsed frontpage article fields to a temp log file
+                        try {
+                            string old = "";
+                            try { GLib.FileUtils.get_contents("/tmp/paperboy-debug.log", out old); } catch (GLib.Error ee) { old = ""; }
+                            string outc = old + "frontpage_parsed: title='" + title.replace("\n", " ").replace("\r", " ") + "' url='" + article_url + "' display_source='" + (display_source != null ? display_source : "<null>") + "'\n";
+                            try { GLib.FileUtils.set_contents("/tmp/paperboy-debug.log", outc); } catch (GLib.Error ee) { }
+                        } catch (GLib.Error e) { }
+
+                        add_item(title, article_url, thumbnail, "frontpage", display_source);
                     }
                     return false;
                 });
@@ -304,6 +393,65 @@ public class NewsSources {
         // Remove all tags
         var regex = new Regex("<[^>]+>", RegexCompileFlags.DEFAULT);
         return regex.replace(input, -1, 0, "");
+    }
+
+    // Safe JSON string accessor: returns null when the member is missing,
+    // not a JSON value node, or when the node cannot be converted to a string.
+    // Avoids using Json.Value/GLib.Value helpers which vary across vapi
+    // versions; instead rely on Json.Node API and a guarded call to get_string().
+    private static string? json_get_string_safe(Json.Object obj, string member) {
+        try {
+            if (!obj.has_member(member)) return null;
+            var node = obj.get_member(member);
+            if (node == null) return null;
+            if (node.get_node_type() != Json.NodeType.VALUE) return null;
+            // Json.Node.get_string() will throw if the value isn't a string,
+            // so guard it with try/catch and return null on error.
+            try {
+                return node.get_string();
+            } catch (GLib.Error e) {
+                return null;
+            }
+        } catch (GLib.Error e) {
+            return null;
+        }
+    }
+    // Infer a friendly display name from an article URL when the backend
+    // does not provide a meaningful provider name. This uses the host
+    // portion of the URL (stripping www and ports) and turns label parts
+    // into Title Case (e.g. "nytimes" -> "Nytimes", "the-guardian" -> "The Guardian").
+    private static string infer_display_name_from_url(string? url) {
+        if (url == null) return "Paperboy";
+        string u = url.strip();
+        if (u.length == 0) return "Paperboy";
+        // Remove scheme if present
+        int pos = u.index_of("://");
+    if (pos >= 0) u = u.substring(pos + 3);
+        // Remove path
+    int slash = u.index_of("/");
+    if (slash >= 0) u = u.substring(0, slash);
+        // Remove port
+    int colon = u.index_of(":");
+    if (colon >= 0) u = u.substring(0, colon);
+        // Strip common www prefix
+    if (u.has_prefix("www.")) u = u.substring(4);
+        if (u.length == 0) return "Paperboy";
+    string[] parts = u.split(".");
+        string label = parts.length > 0 ? parts[0] : u;
+        label = label.replace("-", " ").replace("_", " ");
+        string[] words = label.split(" ");
+        string out = "";
+        for (int i = 0; i < words.length; i++) {
+            string w = words[i].strip();
+            if (w.length == 0) continue;
+            // Upper-case the first character (ASCII only) and keep the rest as-is
+            string head = w.substring(0, 1);
+            string tail = w.length > 1 ? w.substring(1) : "";
+            if (out.length > 0) out += " ";
+            out += head + tail;
+        }
+        if (out.length == 0) out = u;
+        return out;
     }
     private static string category_display_name(string cat) {
         switch (cat) {

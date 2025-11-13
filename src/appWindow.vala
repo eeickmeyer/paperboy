@@ -516,6 +516,20 @@ public class NewsWindow : Adw.ApplicationWindow {
             // "Local News" appears to do nothing.
             try { update_local_news_ui(); } catch (GLib.Error e) { }
 
+            // If the user activated the special "frontpage" row, trigger
+            // the fetch immediately (instead of only deferring it). This
+            // prevents a subtle race where the deferred idle path may
+            // observe a different UI/source state when exactly one
+            // preferred source is configured and fall back to "All
+            // Categories". Calling fetch synchronously here ensures the
+            // backend frontpage fetch runs reliably on click.
+            try {
+                if (cat == "frontpage") {
+                    fetch_news();
+                    return;
+                }
+            } catch (GLib.Error e) { }
+
             // Defer the fetch to the main loop to avoid re-entrant rebuilds
             // that remove the row while the handler is still running. Set
             // the preference again inside the Idle callback to avoid race
@@ -713,6 +727,40 @@ public class NewsWindow : Adw.ApplicationWindow {
             }
         } catch (GLib.Error e) { }
         // If multiple preferred sources are selected, show a combined label
+        // For the special "frontpage" category, present a generic
+        // "Multiple Sources" label and bundled monochrome logo. Keep this
+        // UI-only: fetching is handled elsewhere (in fetch_news) so we must
+        // not attempt to call fetch-specific callbacks or variables here.
+        if (prefs.category == "frontpage") {
+            try { source_label.set_text("Multiple Sources"); } catch (GLib.Error e) { }
+            try {
+                string? multi_icon = find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono.svg"));
+                if (multi_icon == null) multi_icon = find_data_file(GLib.Path.build_filename("icons", "multiple-mono.svg"));
+                if (multi_icon != null) {
+                    string use_path = multi_icon;
+                    try {
+                        if (is_dark_mode()) {
+                            string? white_cand = find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono-white.svg"));
+                            if (white_cand == null) white_cand = find_data_file(GLib.Path.build_filename("icons", "multiple-mono-white.svg"));
+                            if (white_cand != null) use_path = white_cand;
+                        }
+                    } catch (GLib.Error e) { }
+                    try {
+                        var pix = new Gdk.Pixbuf.from_file_at_size(use_path, 32, 32);
+                        if (pix != null) {
+                            var tex = Gdk.Texture.for_pixbuf(pix);
+                            source_logo.set_from_paintable(tex);
+                        } else {
+                            try { source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { }
+                        }
+                    } catch (GLib.Error e) { try { source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { } }
+                } else {
+                    try { source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error e) { }
+                }
+            } catch (GLib.Error e) { }
+            return;
+        }
+
         if (prefs.preferred_sources != null && prefs.preferred_sources.size > 1) {
             source_label.set_text("Multiple Sources");
             // Prefer the pre-bundled symbolic mono icons (symbolic/)
@@ -1729,10 +1777,13 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
 
         // Enforce that articles originate from the user's selected sources.
+        // For the special aggregated "frontpage" category, do NOT enforce
+        // per-source filtering because the backend intentionally returns
+        // mixed-source results for the frontpage view.
         // Map the inferred source to the preference id strings and drop any
         // articles that come from sources the user hasn't enabled. This
         // protects against fetchers that may return cross-domain results.
-        if (prefs.preferred_sources != null && prefs.preferred_sources.size > 0) {
+        if (category_id != "frontpage" && prefs.preferred_sources != null && prefs.preferred_sources.size > 0) {
             NewsSource article_src = infer_source_from_url(url);
             string article_src_id = "";
             switch (article_src) {
@@ -2378,9 +2429,12 @@ public class NewsWindow : Adw.ApplicationWindow {
     // Add source badge to normal card. For local feeds we don't show a
     // provider badge because the feed may represent many sources or
     // the source attribution is already present in the feed items.
-    if (category_id != "local_news") {
-        NewsSource card_src = resolve_source(source_name, url);
-        var card_badge = build_source_badge(card_src);
+        if (category_id != "local_news") {
+        // Build a dynamic source badge that prefers known NewsSource icons
+        // but will fall back to API-provided source names and local icon
+        // assets when available. Pass the category so 'frontpage' is treated
+        // as its own authoritative source (no mapping to user prefs).
+        var card_badge = build_source_badge_dynamic(source_name, url, category_id);
         overlay.add_overlay(card_badge);
     }
 
@@ -2507,7 +2561,9 @@ public class NewsWindow : Adw.ApplicationWindow {
                     if (lm != null) msg.request_headers.append("If-Modified-Since", lm);
                 }
 
+                append_debug_log("start_image_download_for_url: sending request url=" + url + " size=" + target_w.to_string() + "x" + target_h.to_string());
                 session.send_message(msg);
+                append_debug_log("start_image_download_for_url: got response status=" + msg.status_code.to_string() + " body_len=" + msg.response_body.length.to_string() + " url=" + url);
 
                 if (prefs.news_source == NewsSource.REDDIT && msg.response_body.length > 2 * 1024 * 1024) {
                     Idle.add(() => {
@@ -2535,10 +2591,11 @@ public class NewsWindow : Adw.ApplicationWindow {
                             double scale = double.min((double) target_w / width, (double) target_h / height);
                             if (scale < 1.0) {
                                 int new_width = (int)(width * scale);
+                                if (new_width < 1) new_width = 1;
                                 int new_height = (int)(height * scale);
-                                if (new_width >= 64 && new_height >= 64) {
-                                    pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.HYPER);
-                                }
+                                if (new_height < 1) new_height = 1;
+                                // Always scale down to the requested target (even for small badges)
+                                pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.HYPER);
                             } else if (scale > 1.0) {
                                 double max_upscale = 2.0;
                                 double upscale = double.min(scale, max_upscale);
@@ -2630,37 +2687,54 @@ public class NewsWindow : Adw.ApplicationWindow {
                 }
 
                 if (msg.status_code == 304) {
+                    append_debug_log("start_image_download_for_url: 304 Not Modified for url=" + url);
                     // Not modified; refresh last-access and serve cached image
                     Idle.add(() => {
                         if (meta_cache != null) meta_cache.touch(url);
                         var path = meta_cache != null ? meta_cache.get_cached_path(url) : null;
                         if (path != null) {
+                            append_debug_log("start_image_download_for_url: serving disk-cached path=" + path + " for url=" + url);
                             try {
+                                Gdk.Texture? texture = null;
                                 var pix = new Gdk.Pixbuf.from_file(path);
-                                var texture = Gdk.Texture.for_pixbuf(pix);
-                                // Store keyed by requested size if we have it, else fallback to URL
+                                // If we know the requested size for this URL, scale to it so
+                                // cached textures match what callers expect (avoid oversized logos)
                                 var size_rec = requested_image_sizes.get(url);
-                                if (size_rec != null && size_rec.length > 0) {
+                                if (pix != null && size_rec != null && size_rec.length > 0) {
                                     try {
                                         string[] parts = size_rec.split("x");
                                         if (parts.length == 2) {
                                             int sw = int.parse(parts[0]);
                                             int sh = int.parse(parts[1]);
+                                            double sc = double.min((double) sw / pix.get_width(), (double) sh / pix.get_height());
+                                            if (sc < 1.0) {
+                                                int nw = (int)(pix.get_width() * sc);
+                                                if (nw < 1) nw = 1;
+                                                int nh = (int)(pix.get_height() * sc);
+                                                if (nh < 1) nh = 1;
+                                                try { pix = pix.scale_simple(nw, nh, Gdk.InterpType.BILINEAR); } catch (GLib.Error e) { }
+                                            }
+                                            texture = Gdk.Texture.for_pixbuf(pix);
                                             string k = make_cache_key(url, sw, sh);
                                             memory_meta_cache.set(k, texture);
+                                            memory_meta_cache.set(url, texture);
                                         } else {
+                                            texture = Gdk.Texture.for_pixbuf(pix);
                                             memory_meta_cache.set(url, texture);
                                         }
                                     } catch (GLib.Error e) {
+                                        texture = Gdk.Texture.for_pixbuf(pix);
                                         memory_meta_cache.set(url, texture);
                                     }
-                                } else {
+                                } else if (pix != null) {
+                                    texture = Gdk.Texture.for_pixbuf(pix);
                                     memory_meta_cache.set(url, texture);
                                 }
                                 var list2 = pending_downloads.get(url);
                                 if (list2 != null) {
                                     foreach (var pic in list2) {
-                                        pic.set_paintable(texture);
+                                        if (texture != null) pic.set_paintable(texture);
+                                        else set_placeholder_image_for_source(pic, target_w, target_h, infer_source_from_url(url));
                                         on_image_loaded(pic);
                                     }
                                     pending_downloads.remove(url);
@@ -2701,6 +2775,7 @@ public class NewsWindow : Adw.ApplicationWindow {
                                 string? ct = null;
                                 try { ct = msg.response_headers.get_one("Content-Type"); } catch (GLib.Error e) { ct = null; }
                                 meta_cache.write_cache(url, data, etg, lm2, ct);
+                                append_debug_log("start_image_download_for_url: wrote disk cache for url=" + url + " etag=" + (etg != null ? etg : "<null>"));
                             } catch (GLib.Error e) { }
                         }
 
@@ -2714,10 +2789,12 @@ public class NewsWindow : Adw.ApplicationWindow {
                             double scale = double.min((double) target_w / width, (double) target_h / height);
                             if (scale < 1.0) {
                                 int new_width = (int)(width * scale);
+                                if (new_width < 1) new_width = 1;
                                 int new_height = (int)(height * scale);
-                                if (new_width >= 64 && new_height >= 64) {
-                                    pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.HYPER);
-                                }
+                                if (new_height < 1) new_height = 1;
+                                // Always scale down to the requested target so badges/layouts receive
+                                // appropriately-sized textures (allow small targets like 20x20).
+                                pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.HYPER);
                             } else if (scale > 1.0) {
                                 double max_upscale = 2.0;
                                 double upscale = double.min(scale, max_upscale);
@@ -2865,6 +2942,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         string key = make_cache_key(url, target_w, target_h);
         var cached = memory_meta_cache.get(key);
         if (cached != null) {
+            append_debug_log("load_image_async: memory cache hit key=" + key + " url=" + url + " size=" + target_w.to_string() + "x" + target_h.to_string());
             image.set_paintable(cached);
             on_image_loaded(image);
             return;
@@ -2872,14 +2950,55 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Fallback: if there's a texture cached for the URL without size (old behavior), use it
         var cached_any = memory_meta_cache.get(url);
         if (cached_any != null) {
+            append_debug_log("load_image_async: memory cache (any-size) hit url=" + url + " size=" + target_w.to_string() + "x" + target_h.to_string());
             image.set_paintable(cached_any);
             on_image_loaded(image);
             return;
         }
 
+        // Eager disk short-circuit: if we have the image on-disk from a
+        // previous run (MetaCache), load it synchronously and populate the
+        // size-keyed memory cache so the UI shows logos immediately.
+        try {
+            if (meta_cache != null) {
+                var disk_path = meta_cache.get_cached_path(url);
+                if (disk_path != null) {
+                    append_debug_log("load_image_async: disk cache hit path=" + disk_path + " url=" + url + " size=" + target_w.to_string() + "x" + target_h.to_string());
+                    try {
+                        var pix = new Gdk.Pixbuf.from_file(disk_path);
+                        if (pix != null) {
+                            // If the on-disk image is larger than requested, scale it
+                            int width = pix.get_width();
+                            int height = pix.get_height();
+                            double scale = double.min((double) target_w / width, (double) target_h / height);
+                            if (scale < 1.0) {
+                                int new_w = (int)(width * scale);
+                                if (new_w < 1) new_w = 1;
+                                int new_h = (int)(height * scale);
+                                if (new_h < 1) new_h = 1;
+                                try { pix = pix.scale_simple(new_w, new_h, Gdk.InterpType.BILINEAR); } catch (GLib.Error e) { }
+                            }
+                            // Create a texture and cache it under the size-key
+                            var tex = Gdk.Texture.for_pixbuf(pix);
+                            string size_key = make_cache_key(url, target_w, target_h);
+                            memory_meta_cache.set(size_key, tex);
+                            // also keep a URL-keyed fallback for older callers
+                            memory_meta_cache.set(url, tex);
+                            image.set_paintable(tex);
+                            on_image_loaded(image);
+                            return;
+                        }
+                    } catch (GLib.Error e) {
+                        // Fall through to network fetch on any disk read/decoding error
+                    }
+                }
+            }
+        } catch (GLib.Error e) { /* best-effort; continue to network path */ }
+
         // If a download is already in-flight for this URL, enqueue the widget and return
         var existing = pending_downloads.get(url);
         if (existing != null) {
+            append_debug_log("load_image_async: pending download exists, enqueueing url=" + url + " size=" + target_w.to_string() + "x" + target_h.to_string());
             existing.add(image);
             return;
         }
@@ -2887,7 +3006,8 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Otherwise, create a pending list and start the download (subject to concurrency cap)
         var list = new Gee.ArrayList<Gtk.Picture>();
         list.add(image);
-        pending_downloads.set(url, list);
+    pending_downloads.set(url, list);
+    append_debug_log("load_image_async: queued download url=" + url + " size=" + target_w.to_string() + "x" + target_h.to_string());
         // Remember the last requested size for this URL so we can upgrade later
         requested_image_sizes.set(url, "%dx%d".printf(target_w, target_h));
         // Also record under a normalized key (url_to_picture uses normalized URLs)
@@ -2895,7 +3015,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             string nkey = normalize_article_url(url);
             if (nkey != null && nkey.length > 0) requested_image_sizes.set(nkey, "%dx%d".printf(target_w, target_h));
         } catch (GLib.Error e) { }
-        ensure_start_download(url, target_w, target_h);
+    ensure_start_download(url, target_w, target_h);
     }
     
 
@@ -3011,6 +3131,172 @@ public class NewsWindow : Adw.ApplicationWindow {
         } catch (GLib.Error e) { }
 
         return resolved;
+    }
+
+    // Normalize an arbitrary source display name into candidate icon basenames.
+    // e.g. "Associated Press" -> "associated-press" / "associated_press"
+    private string[] source_name_to_icon_candidates(string name) {
+        string low = name.down();
+        // Remove punctuation except spaces and dashes/underscores
+        var sb = new StringBuilder();
+        for (int i = 0; i < low.length; i++) {
+            char c = low[i];
+            if (c.isalnum() || c == ' ' || c == '-' || c == '_') sb.append_c(c);
+            else sb.append_c(' ');
+        }
+        string cleaned = sb.str.strip();
+        // Variants: hyphen, underscore, concatenated
+    string hyphen = cleaned.replace(" ", "-").replace("--", "-");
+    string underscore = cleaned.replace(" ", "_").replace("__", "_");
+    string concat = cleaned.replace(" ", "");
+        return new string[] { hyphen, underscore, concat };
+    }
+
+    // Build a source badge using the provided arbitrary source name (often
+    // provided by external APIs) and article URL. This attempts to map the
+    // name to a known NewsSource first; if that fails, it looks for a local
+    // icon file derived from the source name. If no icon is found it falls
+    // back to a text-only badge using the provided name.
+    private Gtk.Widget build_source_badge_dynamic(string? source_name, string? url, string? category_id) {
+        // Support encoded API-provided logo information: "Display Name||https://.../logo.png"
+        string? provided_logo_url = null;
+        string? display_name = source_name;
+        if (source_name != null && source_name.index_of("||") >= 0) {
+            string[] parts = source_name.split("||");
+            if (parts.length >= 1) display_name = parts[0].strip();
+            if (parts.length >= 2) provided_logo_url = parts[1].strip();
+        }
+
+        // Debug: record what the badge builder was handed so we can see
+        // whether the frontpage parsing supplied a logo URL or not.
+        try {
+            string in_dn = display_name != null ? display_name : "<null>";
+            string in_logo = provided_logo_url != null ? provided_logo_url : "<null>";
+            append_debug_log("build_source_badge_dynamic: display_name='" + in_dn + "' provided_logo_url='" + in_logo + "' category='" + (category_id != null ? category_id : "<null>") + "'");
+        } catch (GLib.Error e) { }
+
+    // If the source_name maps to a known NewsSource, reuse existing badge
+        // but only when the API did NOT provide an explicit logo URL. When the
+        // API provides a logo URL (encoded with "||") we treat it as the
+        // authoritative branding and do NOT map to the bundled built-in icons.
+        // Additionally: when viewing the special 'frontpage' category the
+        // backend's provided source name/logo should be treated as authoritative
+        // and we must NOT map it to the user's preferred/built-in sources.
+        bool is_frontpage = (category_id != null && category_id == "frontpage");
+        if (!is_frontpage && provided_logo_url == null && display_name != null && display_name.length > 0) {
+            NewsSource resolved = resolve_source(display_name, url);
+            // If resolve_source matched a known built-in source, produce that badge
+            // by checking if get_source_icon_path would return a non-null path.
+            string? icon_path = get_source_icon_path(resolved);
+            if (icon_path != null) return build_source_badge(resolved);
+        }
+
+        // Log parsed badge details for debugging when enabled
+        try {
+            append_debug_log("build_source_badge_dynamic: display_name='" + (display_name != null ? display_name : "<null>") + "' provided_logo_url='" + (provided_logo_url != null ? provided_logo_url : "<null>") + "' category='" + (category_id != null ? category_id : "<null>") + "'");
+        } catch (GLib.Error e) { }
+
+        // Try to find a bundled icon based on the API-provided source name
+            if (display_name != null && display_name.length > 0) {
+            // If the API provided a remote logo URL, prefer using it and
+            // leverage the existing image caching/downloading pipeline.
+                // For frontpage items, prefer the API-provided logo even if it
+                // is not an http(s) URL (some APIs may return data-uris), but
+                // the download pipeline expects http(s) so guard accordingly.
+            // Accept protocol-relative URLs as well (e.g. //example.com/logo.png)
+            if (provided_logo_url != null) {
+                provided_logo_url = provided_logo_url.strip();
+                if (provided_logo_url.has_prefix("//")) {
+                    provided_logo_url = "https:" + provided_logo_url;
+                }
+            }
+
+            if (provided_logo_url != null && (provided_logo_url.has_prefix("http://") || provided_logo_url.has_prefix("https://"))) {
+                var box = new Gtk.Box(Orientation.HORIZONTAL, 6);
+                box.add_css_class("source-badge");
+                box.set_margin_bottom(8);
+                box.set_margin_end(8);
+                box.set_valign(Gtk.Align.END);
+                box.set_halign(Gtk.Align.END);
+
+                // Picture for the remote logo (will be updated from cache or download)
+                var pic = new Gtk.Picture();
+                pic.set_size_request(20, 20);
+                // Start async load which will use memory_meta_cache/meta_cache and
+                // pending_downloads to dedupe and persist the image.
+                try { load_image_async(pic, provided_logo_url, 20, 20); } catch (GLib.Error e) { }
+
+                box.append(pic);
+                var lbl = new Gtk.Label(display_name);
+                lbl.add_css_class("source-badge-label");
+                lbl.set_valign(Gtk.Align.CENTER);
+                lbl.set_xalign(0.5f);
+                lbl.set_ellipsize(Pango.EllipsizeMode.END);
+                lbl.set_max_width_chars(14);
+                box.append(lbl);
+                return box;
+            }
+
+            foreach (var cand in source_name_to_icon_candidates(display_name)) {
+                // Check multiple common locations and suffixes
+                string[] paths = {
+                    GLib.Path.build_filename("icons", cand + "-logo.png"),
+                    GLib.Path.build_filename("icons", cand + "-logo.svg"),
+                    GLib.Path.build_filename("icons", "symbolic", cand + "-symbolic.svg"),
+                    GLib.Path.build_filename("icons", cand + ".png"),
+                    GLib.Path.build_filename("icons", cand + ".svg")
+                };
+                foreach (var rel in paths) {
+                    string? full = find_data_file(rel);
+                    if (full != null) {
+                        // Build a badge that mirrors build_source_badge but uses the
+                        // discovered icon and the provided source_name as label.
+                        var box = new Gtk.Box(Orientation.HORIZONTAL, 6);
+                        box.add_css_class("source-badge");
+                        box.set_margin_bottom(8);
+                        box.set_margin_end(8);
+                        box.set_valign(Gtk.Align.END);
+                        box.set_halign(Gtk.Align.END);
+
+                        try {
+                            var pix = new Gdk.Pixbuf.from_file_at_size(full, 20, 20);
+                            if (pix != null) {
+                                var pic = new Gtk.Picture();
+                                var tex = Gdk.Texture.for_pixbuf(pix);
+                                pic.set_paintable(tex);
+                                pic.set_size_request(20, 20);
+                                box.append(pic);
+                            }
+                        } catch (GLib.Error e) { /* ignore icon load failure */ }
+
+                        var lbl = new Gtk.Label(display_name != null && display_name.length > 0 ? display_name : source_name);
+                        lbl.add_css_class("source-badge-label");
+                        lbl.set_valign(Gtk.Align.CENTER);
+                        lbl.set_xalign(0.5f);
+                        lbl.set_ellipsize(Pango.EllipsizeMode.END);
+                        lbl.set_max_width_chars(14);
+                        box.append(lbl);
+                        return box;
+                    }
+                }
+            }
+        }
+
+        // Last resort: return a text-only badge using the provided source name
+        var box = new Gtk.Box(Orientation.HORIZONTAL, 6);
+        box.add_css_class("source-badge");
+        box.set_margin_bottom(8);
+        box.set_margin_end(8);
+        box.set_valign(Gtk.Align.END);
+        box.set_halign(Gtk.Align.END);
+    var lbl = new Gtk.Label(display_name != null && display_name.length > 0 ? display_name : (source_name != null && source_name.length > 0 ? source_name : "News"));
+        lbl.add_css_class("source-badge-label");
+        lbl.set_valign(Gtk.Align.CENTER);
+        lbl.set_xalign(0.5f);
+        lbl.set_ellipsize(Pango.EllipsizeMode.END);
+        lbl.set_max_width_chars(14);
+        box.append(lbl);
+        return box;
     }
 
     // Build a small source badge widget (icon + short name) to place in the
@@ -4209,7 +4495,94 @@ public class NewsWindow : Adw.ApplicationWindow {
             }
             return;
         }
+        // If the user selected "The Frontpage", always request the backend
+        // frontpage endpoint regardless of preferred_sources. Place this
+        // before the multi-source branch so frontpage works even when the
+        // user has zero or one preferred source selected.
+        if (prefs.category == "frontpage") {
+            // Present the multi-source label/logo in the header
+            try { self_ref.source_label.set_text("Multiple Sources"); } catch (GLib.Error e) { }
+            try {
+                string? multi_icon = self_ref.find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono.svg"));
+                if (multi_icon == null) multi_icon = self_ref.find_data_file(GLib.Path.build_filename("icons", "multiple-mono.svg"));
+                if (multi_icon != null) {
+                    string use_path = multi_icon;
+                    try {
+                        if (self_ref.is_dark_mode()) {
+                            string? white_cand = self_ref.find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono-white.svg"));
+                            if (white_cand == null) white_cand = self_ref.find_data_file(GLib.Path.build_filename("icons", "multiple-mono-white.svg"));
+                            if (white_cand != null) use_path = white_cand;
+                        }
+                    } catch (GLib.Error e) { }
+                    try {
+                        var pix = new Gdk.Pixbuf.from_file_at_size(use_path, 32, 32);
+                        if (pix != null) {
+                            var tex = Gdk.Texture.for_pixbuf(pix);
+                            self_ref.source_logo.set_from_paintable(tex);
+                        } else {
+                            try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { }
+                        }
+                    } catch (GLib.Error e) { try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { } }
+                } else {
+                    try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error e) { }
+                }
+            } catch (GLib.Error e) { }
+            used_multi = true;
+
+            try { wrapped_clear(); } catch (GLib.Error e) { }
+            // Debug marker: set a distinct label so we can confirm this branch runs
+            try { wrapped_set_label("Frontpage — Loading from backend (branch 1)"); } catch (GLib.Error e) { }
+            try {
+                // Write an entry to the debug log so we can inspect behavior when running with PAPERBOY_DEBUG
+                string s = "frontpage-early-branch: preferred_sources_size=" + (prefs.preferred_sources != null ? prefs.preferred_sources.size.to_string() : "0") + "\n";
+                append_debug_log(s);
+            } catch (GLib.Error e) { }
+            NewsSources.fetch(prefs.news_source, "frontpage", current_search_query, session, wrapped_set_label, wrapped_clear, wrapped_add);
+            return;
+        }
         if (prefs.preferred_sources != null && prefs.preferred_sources.size > 1) {
+            // Treat The Frontpage as a multi-source view visually, but do NOT
+            // let the user's preferred_sources list influence which providers
+            // are queried. Instead, when viewing the special "frontpage"
+            // category, simply request the backend frontpage once and present
+            // the combined/multi-source UI.
+            if (prefs.category == "frontpage") {
+                try { self_ref.source_label.set_text("Multiple Sources"); } catch (GLib.Error e) { }
+                try {
+                    string? multi_icon = self_ref.find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono.svg"));
+                    if (multi_icon == null) multi_icon = self_ref.find_data_file(GLib.Path.build_filename("icons", "multiple-mono.svg"));
+                    if (multi_icon != null) {
+                        string use_path = multi_icon;
+                        try {
+                            if (self_ref.is_dark_mode()) {
+                                string? white_cand = self_ref.find_data_file(GLib.Path.build_filename("icons", "symbolic", "multiple-mono-white.svg"));
+                                if (white_cand == null) white_cand = self_ref.find_data_file(GLib.Path.build_filename("icons", "multiple-mono-white.svg"));
+                                if (white_cand != null) use_path = white_cand;
+                            }
+                        } catch (GLib.Error e) { }
+                        try {
+                            var pix = new Gdk.Pixbuf.from_file_at_size(use_path, 32, 32);
+                            if (pix != null) {
+                                var tex = Gdk.Texture.for_pixbuf(pix);
+                                self_ref.source_logo.set_from_paintable(tex);
+                            } else {
+                                try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { }
+                            }
+                        } catch (GLib.Error e) { try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error ee) { } }
+                    } else {
+                        try { self_ref.source_logo.set_from_icon_name("application-rss+xml-symbolic"); } catch (GLib.Error e) { }
+                    }
+                } catch (GLib.Error e) { }
+                used_multi = true;
+
+                // Clear UI and ask the backend frontpage fetcher once. NewsSources
+                // will route a request with current_category == "frontpage" to
+                // the Paperboy backend fetcher regardless of the NewsSource value.
+                try { wrapped_clear(); } catch (GLib.Error e) { }
+                NewsSources.fetch(prefs.news_source, "frontpage", current_search_query, session, wrapped_set_label, wrapped_clear, wrapped_add);
+                return;
+            }
+
             // Display a combined label and bundled monochrome logo for multi-source mode
             try {
                 self_ref.source_label.set_text("Multiple Sources");
@@ -4346,6 +4719,18 @@ public class NewsWindow : Adw.ApplicationWindow {
             // Single-source path: keep existing behavior. Use the
             // effective source so a single selected preferred_source is
             // respected without requiring prefs.news_source to be changed.
+            // Special-case: when viewing The Frontpage in single-source
+            // mode, make sure we still request the backend frontpage API.
+            if (prefs.category == "frontpage") {
+                try { wrapped_clear(); } catch (GLib.Error e) { }
+                try { wrapped_set_label("Frontpage — Loading from backend (single-source)"); } catch (GLib.Error e) { }
+                try {
+                    string s = "frontpage-single-source-branch: preferred_sources_size=" + (prefs.preferred_sources != null ? prefs.preferred_sources.size.to_string() : "0") + "\n";
+                    append_debug_log(s);
+                } catch (GLib.Error e) { }
+                NewsSources.fetch(prefs.news_source, "frontpage", current_search_query, session, wrapped_set_label, wrapped_clear, wrapped_add);
+                return;
+            }
             if (is_myfeed_mode) {
                 // Fetch each personalized category for the single effective source
                 try { wrapped_clear(); } catch (GLib.Error e) { }
