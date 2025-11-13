@@ -115,7 +115,8 @@ public class ArticleWindow : GLib.Object {
         ttl.set_wrap(true);
         ttl.set_wrap_mode(Pango.WrapMode.WORD_CHAR);
         ttl.set_lines(4);
-        ttl.set_selectable(true);
+        ttl.set_selectable(true);  // Keep selectable for copying
+        ttl.set_can_focus(false);  // Prevent cursor from appearing
         ttl.set_justify(Gtk.Justification.LEFT);
         title_wrap.append(ttl);
 
@@ -219,6 +220,7 @@ public class ArticleWindow : GLib.Object {
         // and be scrollable.
         snippet_label.set_lines(12);
         snippet_label.set_selectable(true);
+        snippet_label.set_can_focus(false);  // Prevent cursor from appearing
         snippet_label.set_justify(Gtk.Justification.LEFT);
         pad.append(snippet_label);
 
@@ -262,6 +264,12 @@ public class ArticleWindow : GLib.Object {
         if (preview_split != null) {
             preview_split.set_show_sidebar(true);
         }
+        
+        // Clear any auto-selection on the title label after it's shown
+        Idle.add(() => {
+            try { ttl.select_region(0, 0); } catch (GLib.Error e) { }
+            return false;
+        });
         
         back_btn.set_visible(true);
         // Attach a one-shot handler to the shared header back button so
