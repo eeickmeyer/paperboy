@@ -118,6 +118,8 @@ public class NewsWindow : Adw.ApplicationWindow {
     private Gtk.ListBox sidebar_list;
     private Adw.OverlaySplitView split_view;
     private Gtk.ScrolledWindow sidebar_scrolled;
+    // Main content scrolled window (exposed so we can capture/restore scroll)
+    private Gtk.ScrolledWindow main_scrolled;
     private NewsPreferences prefs;
     // Holders for sidebar prefix icons so we can live-switch on theme changes
     private Gee.HashMap<string, Gtk.Box> sidebar_icon_holders = new Gee.HashMap<string, Gtk.Box>();
@@ -146,6 +148,8 @@ public class NewsWindow : Adw.ApplicationWindow {
     // Remember the URL of the currently-open preview so keyboard/escape handlers
     // can mark viewed when the user returns to the main view
     private string? last_previewed_url;
+    // Keep the last vertical scroll offset so we can restore it when closing previews
+    private double last_scroll_value = -1.0;
     private MetaCache? meta_cache;
 
     // In-memory image cache (URL -> Gdk.Texture) to avoid repeated decodes during a session
@@ -1101,9 +1105,9 @@ public class NewsWindow : Adw.ApplicationWindow {
         sidebar_scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC);
         sidebar_scrolled.set_child(sidebar_list);
 
-        var scrolled = new Gtk.ScrolledWindow();
-        scrolled.set_vexpand(true);
-        scrolled.set_hexpand(true);
+    main_scrolled = new Gtk.ScrolledWindow();
+    main_scrolled.set_vexpand(true);
+    main_scrolled.set_hexpand(true);
 
         // Create a size-constraining container that responds to window size
         content_area = new Gtk.Box(Gtk.Orientation.HORIZONTAL, 0);
@@ -1327,15 +1331,15 @@ public class NewsWindow : Adw.ApplicationWindow {
     content_box.append(main_overlay);
         
         // Add content_box to content_area and set up proper containment
-        content_area.append(content_box);
-        scrolled.set_child(content_area);
+    content_area.append(content_box);
+    main_scrolled.set_child(content_area);
 
     // Split view: sidebar + content with collapsible sidebar
     split_view = new Adw.OverlaySplitView();
     split_view.set_sidebar(sidebar_scrolled);
     // Wrap content in a NavigationView so we can slide in a preview page
     nav_view = new Adw.NavigationView();
-    var main_page = new Adw.NavigationPage(scrolled, "Main");
+    var main_page = new Adw.NavigationPage(main_scrolled, "Main");
     nav_view.push(main_page);
 
     // Create a root overlay that wraps the NavigationView so we can
@@ -3830,7 +3834,16 @@ public class NewsWindow : Adw.ApplicationWindow {
     // can remember which URL is active (used by keyboard handlers).
     public void preview_opened(string url) {
         try { last_previewed_url = url; } catch (GLib.Error e) { last_previewed_url = null; }
-        try { append_debug_log("preview_opened: " + (url != null ? url : "<null>")); } catch (GLib.Error e) { }
+        // Capture current vertical scroll offset so we can restore it when the preview closes
+        try {
+            if (main_scrolled != null) {
+                try {
+                    var adj = main_scrolled.get_vadjustment();
+                    if (adj != null) last_scroll_value = adj.get_value();
+                } catch (GLib.Error e) { last_scroll_value = -1.0; }
+            }
+        } catch (GLib.Error e) { last_scroll_value = -1.0; }
+        try { append_debug_log("preview_opened: " + (url != null ? url : "<null>") + " scroll=" + last_scroll_value.to_string()); } catch (GLib.Error e) { }
     }
 
     // Called by ArticleWindow when the preview is closed; mark the article
@@ -3838,7 +3851,25 @@ public class NewsWindow : Adw.ApplicationWindow {
     public void preview_closed(string url) {
         try { last_previewed_url = null; } catch (GLib.Error e) { }
         try { append_debug_log("preview_closed: " + (url != null ? url : "<null>")); } catch (GLib.Error e) { }
+        // Mark viewed immediately
         try { if (url != null) mark_article_viewed(url); } catch (GLib.Error e) { }
+        // Restore previous scroll offset after the preview is popped. Use idle so any layout/navigation
+        // changes complete first and don't stomp our restored value.
+        try {
+            if (main_scrolled != null && last_scroll_value >= 0.0) {
+                Idle.add(() => {
+                    try {
+                        var adj = main_scrolled.get_vadjustment();
+                        if (adj != null) {
+                            adj.set_value(last_scroll_value);
+                        }
+                    } catch (GLib.Error e) { }
+                    // Reset stored value
+                    last_scroll_value = -1.0;
+                    return false;
+                });
+            }
+        } catch (GLib.Error e) { last_scroll_value = -1.0; }
     }
 
     private void create_icon_placeholder(Gtk.Picture image, string icon_path, int width, int height) {
