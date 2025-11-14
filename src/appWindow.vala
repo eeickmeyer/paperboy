@@ -1538,6 +1538,61 @@ public class NewsWindow : Adw.ApplicationWindow {
         return create_category_icon(cat);
     }
 
+    // Centralized content-header updater.
+    // This enforces the rule: the content header shows only the category
+    // icon and the category display name. When a search is active the
+    // header becomes: Search Results: "<query>" in <Category Display Name>.
+    // This helper is safe to call from worker threads because it schedules
+    // the actual UI updates on the main loop via Idle.add.
+    private void update_content_header() {
+        string disp = category_display_name_for(prefs.category);
+        string label_text;
+        try {
+            if (current_search_query != null && current_search_query.length > 0)
+                label_text = "Search Results: \"" + current_search_query + "\" in " + disp;
+            else
+                label_text = disp;
+        } catch (GLib.Error e) {
+            // Fallback conservatively
+            label_text = disp;
+        }
+        // Schedule on main loop to guarantee safe GTK access.
+        Idle.add(() => {
+            try { if (category_label != null) category_label.set_text(label_text); } catch (GLib.Error e) { }
+            try { update_category_icon(); } catch (GLib.Error e) { }
+            // Also ensure the top-right source badge reflects the current
+            // source configuration (single source -> logo+name, multiple
+            // sources or frontpage -> multi-source badge). Call the
+            // updater on the main loop to keep UI changes centralized.
+            try { update_source_info(); } catch (GLib.Error e) { }
+            return false;
+        });
+    }
+
+    // Synchronous variant intended to be called from the main thread when
+    // we need the header to be painted immediately before constructing
+    // any article/hero widgets. This performs the same updates as
+    // update_content_header but runs them synchronously (no Idle.add).
+    private void update_content_header_now() {
+        string disp = category_display_name_for(prefs.category);
+        string label_text;
+        try {
+            if (current_search_query != null && current_search_query.length > 0)
+                label_text = "Search Results: \"" + current_search_query + "\" in " + disp;
+            else
+                label_text = disp;
+        } catch (GLib.Error e) {
+            label_text = disp;
+        }
+
+        try { if (category_label != null) category_label.set_text(label_text); } catch (GLib.Error e) { }
+        try { update_category_icon(); } catch (GLib.Error e) { }
+        // Ensure the top-right source badge is in sync with the current
+        // source selection. This will show either the single-source
+        // logo+name or the multiple-sources badge for aggregated views.
+        try { update_source_info(); } catch (GLib.Error e) { }
+    }
+
     // Public helper to update personalized-feed UI state -- shows or hides
     // the centered message overlay depending on the preference.
     public void update_personalization_ui() {
@@ -1801,15 +1856,35 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Do not hide the initial loading spinner here; we'll reveal content
         // once the hero image is ready or after a short timeout to avoid jarring.
         // If we already have a picture registered for this URL, treat this as an image update
-        string normalized = normalize_article_url(url);
-        Gtk.Picture? existing = url_to_picture.get(normalized);
-            // Fallback: try fuzzy match (strip/trailing differences or query variants)
-        if (existing == null) {
+        // Normalize the article URL for stable mapping. Be defensive: if
+        // normalization fails or returns null/empty, fall back to the raw
+        // URL (or an empty string) so we never pass a NULL key into Gee.
+        string normalized = "";
+        try {
+            if (url != null) normalized = normalize_article_url(url);
+        } catch (GLib.Error e) {
+            // Best-effort fallback
+            normalized = url != null ? url : "";
+        }
+
+        // Guard against an uninitialized map (shouldn't happen in normal
+        // constructor flow) and avoid passing a NULL key into Gee which can
+        // cause a crash. Use a safe empty-string key if needed.
+        if (normalized == null) normalized = "";
+
+        Gtk.Picture? existing = null;
+        if (url_to_picture != null) {
+            try { existing = url_to_picture.get(normalized); } catch (GLib.Error e) { existing = null; }
+        }
+
+        // Fallback: try fuzzy match (strip/trailing differences or query variants)
+        if (existing == null && url_to_picture != null && normalized.length > 0) {
             foreach (var kv in url_to_picture.entries) {
                 string k = kv.key;
                 if (k == null) continue;
                 // Match when one URL is a suffix of the other (same article, different params)
-                if (k.has_suffix(normalized) || normalized.has_suffix(k)) {
+                // Guard against empty strings to avoid surprising behaviour.
+                if (k.length > 0 && (k.has_suffix(normalized) || normalized.has_suffix(k))) {
                     existing = kv.value;
                     // fuzzy match found; update will proceed without debug logging
                     break;
@@ -4550,15 +4625,20 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Instead, ensure the personalized overlay is updated and return.
         bool is_myfeed_disabled = (prefs.category == "myfeed" && !prefs.personalized_feed_enabled);
         if (is_myfeed_disabled) {
-            try { if (current_search_query.length > 0) category_label.set_text("Search Results: \"" + current_search_query + "\" in My Feed"); else category_label.set_text("My Feed"); } catch (GLib.Error e) { }
+            try { update_content_header(); } catch (GLib.Error e) { }
             try { update_personalization_ui(); } catch (GLib.Error e) { }
             // Ensure any spinner is hidden and don't proceed to fetch
             hide_loading_spinner();
             return;
         }
 
-        // Show loading spinner while fetching content
-        show_loading_spinner();
+    // Show loading spinner while fetching content
+    show_loading_spinner();
+    // Ensure content header (icon + category + optional search text)
+    // is painted immediately before we begin creating hero/article widgets.
+    // update_sidebar_for_source() above has already updated source-related
+    // state; call the synchronous header update now to guarantee ordering.
+    try { update_content_header_now(); } catch (GLib.Error e) { }
         
         // Hide error message if it was visible from a previous failed fetch
         hide_error_message();
@@ -4615,77 +4695,79 @@ public class NewsWindow : Adw.ApplicationWindow {
 
         // Wrapped set_label: only update if this fetch is still current
     SetLabelFunc wrapped_set_label = (text) => {
-            if (my_seq != self_ref.fetch_sequence) {
-                try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) append_debug_log("wrapped_set_label: ignoring stale seq=" + my_seq.to_string() + " current=" + self_ref.fetch_sequence.to_string()); } catch (GLib.Error e) { }
-                return;
-            }
-            // Extract just the category part before the " — " separator
-            string category_part = text;
-            int separator_pos = text.index_of(" — ");
-            if (separator_pos > 0) {
-                category_part = text.substring(0, separator_pos);
-            }
-            self_ref.category_label.set_text(category_part);
-            // Keep the category icon in sync with the active preference
-            // (wrapped_set_label runs on successful fetches and will
-            // reflect the current prefs.category). Use a best-effort
-            // call to avoid crashing on early initialization.
-            try { self_ref.update_category_icon(); } catch (GLib.Error e) { }
+            // Schedule UI updates on the main loop to avoid touching
+            // window fields from worker threads. The Idle callback will
+            // check the fetch_sequence token before applying changes.
+            Idle.add(() => {
+                if (my_seq != self_ref.fetch_sequence) {
+                    try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) append_debug_log("wrapped_set_label: ignoring stale seq=" + my_seq.to_string() + " current=" + self_ref.fetch_sequence.to_string()); } catch (GLib.Error e) { }
+                    return false;
+                }
+                // Use the centralized header updater which enforces the exact
+                // UI contract (icon + category, or Search Results when active).
+                try { self_ref.update_content_header(); } catch (GLib.Error e) { }
+                return false;
+            });
         };
 
         // Wrapped clear_items: only clear if this fetch is still current
         ClearItemsFunc wrapped_clear = () => {
+            // Schedule the clear on the main loop to avoid worker-thread UI access
+            Idle.add(() => {
                 if (my_seq != self_ref.fetch_sequence) {
                     try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) append_debug_log("wrapped_clear: ignoring stale seq=" + my_seq.to_string() + " current=" + self_ref.fetch_sequence.to_string()); } catch (GLib.Error e) { }
-                    return;
+                    return false;
                 }
-            // Clearing was already done above in fetch_news(), but some sources
-            // call clear_items again from worker threads; guard to avoid
-            // clearing content created by a newer fetch.
-            Gtk.Widget? cur = self_ref.featured_box.get_first_child();
-            while (cur != null) {
-                Gtk.Widget? next = cur.get_next_sibling();
-                self_ref.featured_box.remove(cur);
-                cur = next;
-            }
-            self_ref.featured_used = false;
-            // Remove columns' children
-            for (int i = 0; i < self_ref.columns.length; i++) {
-                Gtk.Widget? curc = self_ref.columns[i].get_first_child();
-                while (curc != null) {
-                    Gtk.Widget? next = curc.get_next_sibling();
-                    self_ref.columns[i].remove(curc);
-                    curc = next;
+                // Clearing was already done above in fetch_news(), but some sources
+                // call clear_items again from worker threads; guard to avoid
+                // clearing content created by a newer fetch.
+                Gtk.Widget? cur = self_ref.featured_box.get_first_child();
+                while (cur != null) {
+                    Gtk.Widget? next = cur.get_next_sibling();
+                    self_ref.featured_box.remove(cur);
+                    cur = next;
                 }
-                self_ref.column_heights[i] = 0;
-            }
-            // Reset load-more state
-            self_ref.article_buffer.clear();
-            // Also clear image bookkeeping so subsequent fetches create
-            // fresh widgets instead of updating removed ones.
-            self_ref.url_to_picture.clear();
-            self_ref.hero_requests.clear();
-            self_ref.remaining_articles = null;
-            self_ref.remaining_articles_index = 0;
-            if (self_ref.load_more_button != null) {
-                var parent = self_ref.load_more_button.get_parent() as Gtk.Box;
-                if (parent != null) parent.remove(self_ref.load_more_button);
-                self_ref.load_more_button = null;
-            }
-            self_ref.articles_shown = 0;
+                self_ref.featured_used = false;
+                // Remove columns' children
+                for (int i = 0; i < self_ref.columns.length; i++) {
+                    Gtk.Widget? curc = self_ref.columns[i].get_first_child();
+                    while (curc != null) {
+                        Gtk.Widget? next = curc.get_next_sibling();
+                        self_ref.columns[i].remove(curc);
+                        curc = next;
+                    }
+                    self_ref.column_heights[i] = 0;
+                }
+                // Reset load-more state
+                self_ref.article_buffer.clear();
+                // Also clear image bookkeeping so subsequent fetches create
+                // fresh widgets instead of updating removed ones.
+                try { self_ref.url_to_picture.clear(); } catch (GLib.Error e) { }
+                try { self_ref.hero_requests.clear(); } catch (GLib.Error e) { }
+                self_ref.remaining_articles = null;
+                self_ref.remaining_articles_index = 0;
+                if (self_ref.load_more_button != null) {
+                    var parent = self_ref.load_more_button.get_parent() as Gtk.Box;
+                    if (parent != null) parent.remove(self_ref.load_more_button);
+                    self_ref.load_more_button = null;
+                }
+                self_ref.articles_shown = 0;
+                return false;
+            });
         };
 
         // Wrapped add_item: ignore items from stale fetches
     // Throttled add for Local News: queue incoming items and process in small batches
     var local_news_queue = new Gee.ArrayList<ArticleItem>();
     bool local_news_flush_scheduled = false;
+    // General UI add queue to batch worker->main-thread article additions.
+    // Using a single Idle to drain this queue avoids per-item refs on the
+    // window/object and reduces thread churn that previously caused races
+    // during heavy fetches.
+    var ui_add_queue = new Gee.ArrayList<ArticleItem>();
+    bool ui_add_idle_scheduled = false;
 
     AddItemFunc wrapped_add = (title, url, thumbnail, category_id, source_name) => {
-            if (my_seq != self_ref.fetch_sequence) {
-                try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) append_debug_log("wrapped_add: ignoring stale seq=" + my_seq.to_string() + " current=" + self_ref.fetch_sequence.to_string() + " article_cat=" + category_id); } catch (GLib.Error e) { }
-                return;
-            }
-
             // If we're in Local News mode, enqueue and process in small batches to avoid UI lockups
             try {
                 var prefs_local = NewsPreferences.get_instance();
@@ -4719,8 +4801,49 @@ public class NewsWindow : Adw.ApplicationWindow {
                 }
             } catch (GLib.Error e) { /* best-effort */ }
 
-            // Default: immediate add
-            self_ref.add_item(title, url, thumbnail, category_id, source_name);
+            // Default: push the ArticleItem onto a shared UI queue and
+            // schedule a single Idle to drain items in small batches.
+            // This avoids scheduling one Idle per item (which created a
+            // racey mix of refs) and keeps the main-loop work bounded.
+            var ai = new ArticleItem(title, url, thumbnail, category_id, source_name);
+            try { ai.ref(); } catch (GLib.Error e) { }
+            try {
+                ui_add_queue.add(ai);
+            } catch (GLib.Error e) { try { ai.unref(); } catch (GLib.Error _e) { } }
+
+            if (!ui_add_idle_scheduled) {
+                ui_add_idle_scheduled = true;
+                // Take one extra reference to the window for the duration
+                // of the drain so the object cannot be finalized while we
+                // are processing queued items.
+                try { self_ref.ref(); } catch (GLib.Error e) { }
+                Idle.add(() => {
+                    int processed = 0;
+                    const int BATCH = 8; // process up to 8 items per tick
+                    while (ui_add_queue.size > 0 && processed < BATCH) {
+                        ArticleItem? x = null;
+                        try { x = ui_add_queue.get(0); } catch (GLib.Error e) { x = null; }
+                        if (x == null) break;
+                        try { ui_add_queue.remove_at(0); } catch (GLib.Error e) { }
+                        // Ensure still current before adding
+                        if (my_seq == self_ref.fetch_sequence) {
+                            try { self_ref.add_item(x.title, x.url, x.thumbnail_url, x.category_id, x.source_name); } catch (GLib.Error e) { }
+                        }
+                        // Release the temporary ref we took when enqueuing
+                        try { x.unref(); } catch (GLib.Error e) { }
+                        processed += 1;
+                    }
+                    if (ui_add_queue.size > 0) {
+                        // Keep the idle scheduled until we drain the queue
+                        return true;
+                    } else {
+                        // No more items: clear flag and release window ref
+                        ui_add_idle_scheduled = false;
+                        try { self_ref.unref(); } catch (GLib.Error e) { }
+                        return false;
+                    }
+                });
+            }
         };
 
         // Support fetching from multiple preferred sources when the user
@@ -4778,9 +4901,15 @@ public class NewsWindow : Adw.ApplicationWindow {
             // Clear UI and schedule per-feed fetches
             try { wrapped_clear(); } catch (GLib.Error e) { }
             ClearItemsFunc no_op_clear = () => { };
-            SetLabelFunc label_fn = (text) => {
-                if (current_search_query.length > 0) self_ref.category_label.set_text("Search Results: \"" + current_search_query + "\" in Local News");
-                else self_ref.category_label.set_text("Local News");
+                SetLabelFunc label_fn = (text) => {
+                // Schedule UI update on main loop
+                Idle.add(() => {
+                    if (my_seq != self_ref.fetch_sequence) return false;
+                    try {
+                        self_ref.update_content_header();
+                    } catch (GLib.Error e) { }
+                    return false;
+                });
             };
 
             // Ensure the top-right source badge shows a generic/local affordance
@@ -5022,19 +5151,11 @@ public class NewsWindow : Adw.ApplicationWindow {
                 // each personalized category separately and combine results.
                 ClearItemsFunc no_op_clear = () => { };
                 SetLabelFunc label_fn = (text) => {
-                    string src_label = "Multiple Sources";
-                    string display_cat = is_myfeed_mode ? "My Feed" : category_display_name_for(prefs.category);
-                    // Avoid appending the generic "Multiple Sources" suffix to the
-                    // left-side category title since it is redundant. Only include
-                    // the source name when it is a specific source.
-                    string left_label = display_cat;
-                    if (src_label != "Multiple Sources") left_label = display_cat + " — " + src_label;
-
-                    if (current_search_query.length > 0) {
-                        self_ref.category_label.set_text("Search Results: \"" + current_search_query + "\" in " + left_label);
-                    } else {
-                        self_ref.category_label.set_text(left_label);
-                    }
+                    Idle.add(() => {
+                        if (my_seq != self_ref.fetch_sequence) return false;
+                        try { self_ref.update_content_header(); } catch (GLib.Error e) { }
+                        return false;
+                    });
                 };
                 foreach (var s in use_srcs) {
                     if (is_myfeed_mode) {
@@ -5066,12 +5187,11 @@ public class NewsWindow : Adw.ApplicationWindow {
                 // Fetch each personalized category for the single effective source
                 try { wrapped_clear(); } catch (GLib.Error e) { }
                 SetLabelFunc label_fn = (text) => {
-                    string src_label = get_source_name(effective_news_source());
-                    if (current_search_query.length > 0) {
-                        self_ref.category_label.set_text("Search Results: \"" + current_search_query + "\" in My Feed — " + src_label);
-                    } else {
-                        self_ref.category_label.set_text("My Feed — " + src_label);
-                    }
+                    Idle.add(() => {
+                        if (my_seq != self_ref.fetch_sequence) return false;
+                        try { self_ref.update_content_header(); } catch (GLib.Error e) { }
+                        return false;
+                    });
                 };
                 foreach (var cat in myfeed_cats) {
                     NewsSources.fetch(effective_news_source(), cat, current_search_query, session, label_fn, wrapped_clear, wrapped_add);
