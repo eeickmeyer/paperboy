@@ -14,11 +14,47 @@ public class ImageHandler : GLib.Object {
 
     // Start a single download for a URL and update all registered targets when done.
     public void start_image_download_for_url(string url, int target_w, int target_h) {
-        new Thread<void*>("pb-load-image", () => {
+        // Capture a snapshot of main-thread-only data we need in the worker:
+        int device_scale = 1;
+        try {
+            var list_try = window.pending_downloads.get(url);
+            if (list_try != null && list_try.size > 0) {
+                foreach (var pic_obj in list_try) {
+                    try {
+                        var pic = (Gtk.Picture) pic_obj;
+                        int s = pic.get_scale_factor();
+                        if (s > device_scale) device_scale = s;
+                    } catch (GLib.Error e) {
+                        // ignore and continue
+                    }
+                }
+                if (device_scale < 1) device_scale = 1;
+            }
+        } catch (GLib.Error e) { device_scale = 1; }
+
+    string? size_rec = null;
+    try { size_rec = window.requested_image_sizes.get(url); } catch (GLib.Error e) { size_rec = null; }
+
+    // Capture a few more main-thread-only references/values so the
+    // worker doesn't dereference `window` fields from a background
+    // thread. This keeps the worker self-contained and avoids
+    // potential races on `window` pointer fields.
+    NewsSource news_src = NewsSource.GUARDIAN;
+    try { news_src = window.prefs.news_source; } catch (GLib.Error e) { }
+    var session = window.session;
+    var meta_cache = window.meta_cache;
+
+        // Submit the actual download+decoding job. Using a dedicated thread
+        // here avoids storing Vala delegates into our WorkerPool queue which
+        // can lead to delegate-copying issues (see Vala warnings). This is a
+        // conservative short-term fix to prevent corrupted closure data from
+        // causing crashes; we can replace with a safer pooled implementation
+        // later (for example using GLib.ThreadPool or a C-level queue).
+        new Thread<void*>("image-download", () => {
             GLib.AtomicInt.inc(ref NewsWindow.active_downloads);
             try {
                 var msg = new Soup.Message("GET", url);
-                if (window.prefs.news_source == NewsSource.REDDIT) {
+                if (news_src == NewsSource.REDDIT) {
                     msg.request_headers.append("User-Agent", "Mozilla/5.0 (compatible; Paperboy/1.0)");
                     msg.request_headers.append("Accept", "image/jpeg,image/png,image/webp,image/*;q=0.8");
                     msg.request_headers.append("Cache-Control", "max-age=3600");
@@ -28,9 +64,9 @@ public class ImageHandler : GLib.Object {
                 }
                 msg.request_headers.append("Accept-Encoding", "gzip, deflate, br");
 
-                window.session.send_message(msg);
+                session.send_message(msg);
 
-                if (window.prefs.news_source == NewsSource.REDDIT && msg.response_body.length > 2 * 1024 * 1024) {
+                if (news_src == NewsSource.REDDIT && msg.response_body.length > 2 * 1024 * 1024) {
                     Idle.add(() => {
                         var list = window.pending_downloads.get(url);
                         if (list != null) {
@@ -48,33 +84,13 @@ public class ImageHandler : GLib.Object {
                 if (msg.status_code == 304) {
                     window.append_debug_log("start_image_download_for_url: 304 Not Modified for url=" + url);
                     // Not modified; refresh last-access and serve cached image
-                    Idle.add(() => {
-                        if (window.meta_cache != null) window.meta_cache.touch(url);
-                        var path = window.meta_cache != null ? window.meta_cache.get_cached_path(url) : null;
-                        if (path != null) {
-                            window.append_debug_log("start_image_download_for_url: serving disk-cached path=" + path + " for url=" + url);
-                            try {
-                                Gdk.Texture? texture = null;
-                                var pix = new Gdk.Pixbuf.from_file(path);
-
-                                int device_scale = 1;
-                                try {
-                                    var list_try = window.pending_downloads.get(url);
-                                    if (list_try != null && list_try.size > 0) {
-                                        foreach (var pic_obj in list_try) {
-                                            try {
-                                                var pic = (Gtk.Picture) pic_obj;
-                                                int s = pic.get_scale_factor();
-                                                if (s > device_scale) device_scale = s;
-                                            } catch (GLib.Error e) {
-                                                // ignore and continue
-                                            }
-                                        }
-                                        if (device_scale < 1) device_scale = 1;
-                                    }
-                                } catch (GLib.Error e) { device_scale = 1; }
-
-                                var size_rec = window.requested_image_sizes.get(url);
+                    if (meta_cache != null) meta_cache.touch(url);
+                    var path = meta_cache != null ? meta_cache.get_cached_path(url) : null;
+                    if (path != null) {
+                        window.append_debug_log("start_image_download_for_url: serving disk-cached path=" + path + " for url=" + url);
+                        try {
+                            var pix = new Gdk.Pixbuf.from_file(path);
+                            if (pix != null) {
                                 if (pix != null && size_rec != null && size_rec.length > 0) {
                                     try {
                                         string[] parts = size_rec.split("x");
@@ -92,49 +108,110 @@ public class ImageHandler : GLib.Object {
                                                 if (nh < 1) nh = 1;
                                                 try { pix = pix.scale_simple(nw, nh, Gdk.InterpType.HYPER); } catch (GLib.Error e) { }
                                             }
-                                            texture = Gdk.Texture.for_pixbuf(pix);
                                             string k = window.make_cache_key(url, sw, sh);
-                                            window.memory_meta_cache.set(k, texture);
-                                            if (sw <= 64 && sh <= 64) window.memory_meta_cache.set(url, texture);
-                                            try { window.append_debug_log("start_image_download_for_url: 304 cached size_key=" + k + " pix_after=" + pix.get_width().to_string() + "x" + pix.get_height().to_string()); } catch (GLib.Error e) { }
+                                            var pb_for_idle = pix;
+                                            Idle.add(() => {
+                                                try {
+                                                    Gdk.Texture? texture = null;
+                                                    texture = Gdk.Texture.for_pixbuf(pb_for_idle);
+                                                    window.memory_meta_cache.set(k, texture);
+                                                    if (sw <= 64 && sh <= 64) window.memory_meta_cache.set(url, texture);
+                                                    try { window.append_debug_log("start_image_download_for_url: 304 cached size_key=" + k + " pix_after=" + pb_for_idle.get_width().to_string() + "x" + pb_for_idle.get_height().to_string()); } catch (GLib.Error e) { }
+
+                                                    var list2 = window.pending_downloads.get(url);
+                                                    if (list2 != null) {
+                                                        foreach (var pic in list2) {
+                                                            if (texture != null) pic.set_paintable(texture);
+                                                            else window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url));
+                                                            window.on_image_loaded(pic);
+                                                        }
+                                                        window.pending_downloads.remove(url);
+                                                    }
+                                                } catch (GLib.Error e) {
+                                                    var list2 = window.pending_downloads.get(url);
+                                                    if (list2 != null) {
+                                                        foreach (var pic in list2) { window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url)); window.on_image_loaded(pic); }
+                                                        window.pending_downloads.remove(url);
+                                                    }
+                                                }
+                                                return false;
+                                            });
                                         } else {
-                                            texture = Gdk.Texture.for_pixbuf(pix);
-                                            if (pix.get_width() <= 64 && pix.get_height() <= 64) window.memory_meta_cache.set(url, texture);
+                                            var pb_for_idle = pix;
+                                            Idle.add(() => {
+                                                try {
+                                                    var texture = Gdk.Texture.for_pixbuf(pb_for_idle);
+                                                    if (pb_for_idle.get_width() <= 64 && pb_for_idle.get_height() <= 64) window.memory_meta_cache.set(url, texture);
+                                                    var list2 = window.pending_downloads.get(url);
+                                                    if (list2 != null) {
+                                                        foreach (var pic in list2) {
+                                                            if (texture != null) pic.set_paintable(texture);
+                                                            else window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url));
+                                                            window.on_image_loaded(pic);
+                                                        }
+                                                        window.pending_downloads.remove(url);
+                                                    }
+                                                } catch (GLib.Error e) {
+                                                    var list2 = window.pending_downloads.get(url);
+                                                    if (list2 != null) {
+                                                        foreach (var pic in list2) { window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url)); window.on_image_loaded(pic); }
+                                                        window.pending_downloads.remove(url);
+                                                    }
+                                                }
+                                                return false;
+                                            });
                                         }
                                     } catch (GLib.Error e) {
-                                        texture = Gdk.Texture.for_pixbuf(pix);
-                                        if (pix.get_width() <= 64 && pix.get_height() <= 64) window.memory_meta_cache.set(url, texture);
+                                        var list2 = window.pending_downloads.get(url);
+                                        if (list2 != null) {
+                                            foreach (var pic in list2) { window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url)); window.on_image_loaded(pic); }
+                                            window.pending_downloads.remove(url);
+                                        }
                                     }
-                                } else if (pix != null) {
-                                    texture = Gdk.Texture.for_pixbuf(pix);
-                                    if (pix.get_width() <= 64 && pix.get_height() <= 64) window.memory_meta_cache.set(url, texture);
-                                }
-                                var list2 = window.pending_downloads.get(url);
-                                if (list2 != null) {
-                                    foreach (var pic in list2) {
-                                        if (texture != null) pic.set_paintable(texture);
-                                        else window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url));
-                                        window.on_image_loaded(pic);
-                                    }
-                                    window.pending_downloads.remove(url);
-                                }
-                            } catch (GLib.Error e) {
-                                var list2 = window.pending_downloads.get(url);
-                                if (list2 != null) {
-                                    foreach (var pic in list2) { window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url)); window.on_image_loaded(pic); }
-                                    window.pending_downloads.remove(url);
+                                } else {
+                                    var pb_for_idle = pix;
+                                    Idle.add(() => {
+                                        try {
+                                            var texture = Gdk.Texture.for_pixbuf(pb_for_idle);
+                                            if (pb_for_idle.get_width() <= 64 && pb_for_idle.get_height() <= 64) window.memory_meta_cache.set(url, texture);
+                                            var list2 = window.pending_downloads.get(url);
+                                            if (list2 != null) {
+                                                foreach (var pic in list2) {
+                                                    if (texture != null) pic.set_paintable(texture);
+                                                    else window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url));
+                                                    window.on_image_loaded(pic);
+                                                }
+                                                window.pending_downloads.remove(url);
+                                            }
+                                        } catch (GLib.Error e) {
+                                            var list2 = window.pending_downloads.get(url);
+                                            if (list2 != null) {
+                                                foreach (var pic in list2) { window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url)); window.on_image_loaded(pic); }
+                                                window.pending_downloads.remove(url);
+                                            }
+                                        }
+                                        return false;
+                                    });
                                 }
                             }
-                        } else {
+                        } catch (GLib.Error e) {
                             var list2 = window.pending_downloads.get(url);
                             if (list2 != null) {
                                 foreach (var pic in list2) { window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url)); window.on_image_loaded(pic); }
                                 window.pending_downloads.remove(url);
                             }
                         }
-                        return false;
-                    });
-                    return null;
+                    } else {
+                        Idle.add(() => {
+                            var list2 = window.pending_downloads.get(url);
+                            if (list2 != null) {
+                                foreach (var pic in list2) { window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url)); window.on_image_loaded(pic); }
+                                window.pending_downloads.remove(url);
+                            }
+                            return false;
+                        });
+                    }
+                    // continue after handling 304
                 }
 
                 if (msg.status_code == 200 && msg.response_body.length > 0) {
@@ -142,7 +219,7 @@ public class ImageHandler : GLib.Object {
                         uint8[] data = new uint8[msg.response_body.length];
                         Memory.copy(data, msg.response_body.data, (size_t)msg.response_body.length);
 
-                        if (window.meta_cache != null) {
+                        if (meta_cache != null) {
                             string? etg = null;
                             string? lm2 = null;
                             try { etg = msg.response_headers.get_one("ETag"); } catch (GLib.Error e) { etg = null; }
@@ -150,7 +227,7 @@ public class ImageHandler : GLib.Object {
                             try {
                                 string? ct = null;
                                 try { ct = msg.response_headers.get_one("Content-Type"); } catch (GLib.Error e) { ct = null; }
-                                window.meta_cache.write_cache(url, data, etg, lm2, ct);
+                                meta_cache.write_cache(url, data, etg, lm2, ct);
                                 window.append_debug_log("start_image_download_for_url: wrote disk cache for url=" + url + " etag=" + (etg != null ? etg : "<null>"));
                             } catch (GLib.Error e) { }
                         }
