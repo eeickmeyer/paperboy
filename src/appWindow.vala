@@ -20,6 +20,7 @@ using Gtk;
 using Adw;
 using Soup;
 
+
 public class ArticleItem : GLib.Object {
     public string title { get; set; }
     public string url { get; set; }
@@ -223,7 +224,10 @@ public class NewsWindow : Adw.ApplicationWindow {
     // visible until all initial images are ready (with a safety timeout).
     private int pending_images = 0;
     private bool initial_items_populated = false;
-    private const int INITIAL_MAX_WAIT_MS = 5000; // maximum time to wait for images
+    // How long to wait (ms) for initial article items/images before
+    // showing the global error overlay. Increase this to give slow
+    // or latent network sources more time to respond.
+    private const int INITIAL_MAX_WAIT_MS = 15000; // 15s default
     // Debug log path (written when PAPERBOY_DEBUG is set)
     private string debug_log_path = "/tmp/paperboy-debug.log";
 
@@ -497,6 +501,24 @@ public class NewsWindow : Adw.ApplicationWindow {
     // Initialize in-memory cache and pending-downloads map
     // Capacity chosen conservatively to limit RAM usage; tune if needed.
     memory_meta_cache = new LruCache<string, Gdk.Texture>(200);
+        // Eviction callback: log evictions when PAPERBOY_DEBUG is set so we can
+        // correlate evicted keys with resident memory. Keep lightweight.
+        try {
+            // Register a lightweight eviction callback when debugging is enabled.
+            // Use an untyped lambda so Vala's parser can infer the delegate types
+            // and avoid syntax errors that break compilation.
+            memory_meta_cache.set_eviction_callback((k, v) => {
+                try {
+                    string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                    if (_dbg != null && _dbg.length > 0) {
+                        int w = 0; int h = 0;
+                        try { w = ((Gdk.Texture) v).get_width(); } catch (GLib.Error e) { }
+                        try { h = ((Gdk.Texture) v).get_height(); } catch (GLib.Error e) { }
+                        append_debug_log("DEBUG: memory_meta_cache.evicted=" + k + " tex=" + w.to_string() + "x" + h.to_string());
+                    }
+                } catch (GLib.Error e) { }
+            });
+        } catch (GLib.Error e) { }
         requested_image_sizes = new Gee.HashMap<string, string>();
         pending_downloads = new Gee.HashMap<string, Gee.ArrayList<Gtk.Picture>>();
         deferred_downloads = new Gee.HashMap<Gtk.Picture, DeferredRequest>();
@@ -508,6 +530,8 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
         // Initialize external image handler that owns download/cache logic
         image_handler = new ImageHandler(this);
+
+        
 
         // Load CSS
         var css_provider = new Gtk.CssProvider();
@@ -731,18 +755,44 @@ public class NewsWindow : Adw.ApplicationWindow {
     
     // Add click handler to close preview when clicking the dim overlay
     var dim_click = new Gtk.GestureClick();
-    dim_click.pressed.connect(() => {
-        article_preview_split.set_show_sidebar(false);
-        back_btn.set_visible(false);
-        // Call preview_closed with the last URL to properly mark viewed and restore scroll
+    // Only treat clicks on the dim overlay as a request to close the
+    // preview when they occur outside the preview sidebar itself. If the
+    // user clicks inside the sidebar (the preview panel), ignore the
+    // click so the preview's internal controls can handle it.
+    dim_click.pressed.connect((n_press, x, y) => {
         try {
-            if (last_previewed_url != null && last_previewed_url.length > 0) {
-                preview_closed(last_previewed_url);
-            } else {
+            // If the sidebar is visible, compute its approximate left edge
+            // and ignore clicks that fall inside it. Use the window width
+            // and the preview wrapper width to compute the sidebar region.
+            if (article_preview_split.get_show_sidebar()) {
+                int win_w = 0;
+                int sidebar_w = 0;
+                try { win_w = this.get_width(); } catch (GLib.Error e) { win_w = 0; }
+                try { sidebar_w = preview_wrapper.get_width(); } catch (GLib.Error e) { sidebar_w = 0; }
+                if (win_w > 0 && sidebar_w > 0) {
+                    double sidebar_left = (double)(win_w - sidebar_w);
+                    if (x >= sidebar_left) {
+                        // Click occurred inside the preview panel — ignore it
+                        return;
+                    }
+                }
+            }
+
+            article_preview_split.set_show_sidebar(false);
+            back_btn.set_visible(false);
+            // Call preview_closed with the last URL to properly mark viewed and restore scroll
+            try {
+                if (last_previewed_url != null && last_previewed_url.length > 0) {
+                    preview_closed(last_previewed_url);
+                } else {
+                    dim_overlay.set_visible(false);
+                }
+            } catch (GLib.Error e) {
                 dim_overlay.set_visible(false);
             }
-        } catch (GLib.Error e) { 
-            dim_overlay.set_visible(false);
+        } catch (GLib.Error e) {
+            // Best-effort: if anything goes wrong, hide the dim overlay
+            try { dim_overlay.set_visible(false); } catch (GLib.Error _e) { }
         }
     });
     dim_overlay.add_controller(dim_click);
@@ -910,9 +960,27 @@ public class NewsWindow : Adw.ApplicationWindow {
 
         // Add click event controller to main content area to close preview when clicking outside
         var main_click_controller = new Gtk.GestureClick();
+        // Similar to the dim overlay, ignore clicks that occur inside the
+        // preview sidebar area so interactions within the preview don't
+        // immediately close it.
         main_click_controller.pressed.connect((n_press, x, y) => {
             // Only close if article preview is open (back button is visible)
-            if (back_btn.get_visible()) {
+            if (!back_btn.get_visible()) return;
+            try {
+                if (article_preview_split.get_show_sidebar()) {
+                    int win_w = 0;
+                    int sidebar_w = 0;
+                    try { win_w = this.get_width(); } catch (GLib.Error e) { win_w = 0; }
+                    try { sidebar_w = preview_wrapper.get_width(); } catch (GLib.Error e) { sidebar_w = 0; }
+                    if (win_w > 0 && sidebar_w > 0) {
+                        double sidebar_left = (double)(win_w - sidebar_w);
+                        if (x >= sidebar_left) {
+                            // Click is inside the preview panel — ignore it
+                            return;
+                        }
+                    }
+                }
+
                 article_preview_split.set_show_sidebar(false);
                 back_btn.set_visible(false);
                 // Call preview_closed to properly mark viewed and restore scroll
@@ -925,6 +993,8 @@ public class NewsWindow : Adw.ApplicationWindow {
                 } catch (GLib.Error e) { 
                     dim_overlay.set_visible(false);
                 }
+            } catch (GLib.Error e) { 
+                try { dim_overlay.set_visible(false); } catch (GLib.Error _e) { }
             }
         });
         split_view.add_controller(main_click_controller);
@@ -992,6 +1062,35 @@ public class NewsWindow : Adw.ApplicationWindow {
             try { cache_size = memory_meta_cache.size(); } catch (GLib.Error e) { cache_size = -1; }
             append_debug_log("DEBUG: memory_meta_cache.size=" + cache_size.to_string());
 
+            // If the cache supports key enumeration, dump each entry and any
+            // texture dimensions we can obtain. This helps correlate which
+            // textures are retained in the cache with resident memory.
+            try {
+                // memory_meta_cache is typically LruCache<string, Gdk.Texture>
+                var keys = memory_meta_cache.keys();
+                append_debug_log("DEBUG: memory_meta_cache.keys_count=" + keys.size.to_string());
+                foreach (var k in keys) {
+                    try {
+                        var v = memory_meta_cache.get(k);
+                        if (v is Gdk.Texture) {
+                            var tex = (Gdk.Texture) v;
+                            int w = 0;
+                            int h = 0;
+                            try { w = tex.get_width(); } catch (GLib.Error e) { }
+                            try { h = tex.get_height(); } catch (GLib.Error e) { }
+                            append_debug_log("DEBUG: cache_entry: " + k.to_string() + " => texture " + w.to_string() + "x" + h.to_string());
+                        } else {
+                            append_debug_log("DEBUG: cache_entry: " + k.to_string() + " => non-texture");
+                        }
+                    } catch (GLib.Error e) {
+                        // best-effort per-entry; continue
+                        try { append_debug_log("DEBUG: cache_entry_error for " + k.to_string()); } catch (GLib.Error _e) { }
+                    }
+                }
+            } catch (GLib.Error e) {
+                // ignore diagnostic failures
+            }
+            
             // Count unique textures referenced by registered Picture widgets
             int widget_tex_count = 0;
             try {
@@ -1019,6 +1118,45 @@ public class NewsWindow : Adw.ApplicationWindow {
         } catch (GLib.Error e) {
             // best-effort only
         }
+    }
+
+    // Register a picture for a normalized URL and ensure we remove the
+    // mapping when the picture is destroyed. This avoids `url_to_picture`
+    // retaining removed widgets.
+    private void register_picture_for_url(string normalized, Gtk.Picture pic) {
+        try { url_to_picture.set(normalized, pic); } catch (GLib.Error e) { }
+        try {
+            pic.destroy.connect(() => {
+                try {
+                    Gtk.Picture? cur = null;
+                    try { cur = url_to_picture.get(normalized); } catch (GLib.Error e) { cur = null; }
+                    if (cur == pic) {
+                        try { url_to_picture.remove(normalized); } catch (GLib.Error e) { }
+                        try { append_debug_log("DEBUG: url_to_picture removed mapping for " + normalized + " on picture destroy"); } catch (GLib.Error e) { }
+                    }
+                } catch (GLib.Error e) { }
+            });
+        } catch (GLib.Error e) { }
+    }
+
+    // Register a card/hero widget for a normalized URL and ensure the
+    // mapping is removed when the widget is destroyed. Mirrors the
+    // register_picture_for_url behaviour to avoid retaining dead widgets
+    // in `url_to_card`.
+    private void register_card_for_url(string normalized, Gtk.Widget card) {
+        try { url_to_card.set(normalized, card); } catch (GLib.Error e) { }
+        try {
+            card.destroy.connect(() => {
+                try {
+                    Gtk.Widget? cur = null;
+                    try { cur = url_to_card.get(normalized); } catch (GLib.Error e) { cur = null; }
+                    if (cur == card) {
+                        try { url_to_card.remove(normalized); } catch (GLib.Error e) { }
+                        try { append_debug_log("DEBUG: url_to_card removed mapping for " + normalized + " on widget destroy"); } catch (GLib.Error e) { }
+                    }
+                } catch (GLib.Error e) { }
+            });
+        } catch (GLib.Error e) { }
     }
 
     // Update the small category icon shown left of the main category title.
@@ -1710,10 +1848,9 @@ public class NewsWindow : Adw.ApplicationWindow {
                 image_handler.load_image_async(hero_card.image, thumbnail_url, default_hero_w * multiplier, default_hero_h * multiplier);
                 hero_requests.set(hero_card.image, new HeroRequest(thumbnail_url, default_hero_w * multiplier, default_hero_h * multiplier, multiplier));
                 string _norm = normalize_article_url(url);
-                url_to_picture.set(_norm, hero_card.image);
+                register_picture_for_url(_norm, hero_card.image);
                 normalized_to_url.set(_norm, url);
-                url_to_card.set(_norm, hero_card.root);
-                try { append_debug_log("url_to_card.set: hero mapping url=" + _norm + " widget=hero"); } catch (GLib.Error e) { }
+                register_card_for_url(_norm, hero_card.root);
                 try {
                     if (meta_cache != null) {
                         bool was = false;
@@ -1831,11 +1968,10 @@ public class NewsWindow : Adw.ApplicationWindow {
                 image_handler.load_image_async(slide_image, thumbnail_url, default_w * multiplier, default_h * multiplier);
                 hero_requests.set(slide_image, new HeroRequest(thumbnail_url, default_w * multiplier, default_h * multiplier, multiplier));
                 string _norm = normalize_article_url(url);
-                url_to_picture.set(_norm, slide_image);
+                register_picture_for_url(_norm, slide_image);
                 normalized_to_url.set(_norm, url);
                 // Map slide to URL for viewed badge support
-                url_to_card.set(_norm, slide);
-                try { append_debug_log("url_to_card.set: slide mapping url=" + _norm + " widget=slide"); } catch (GLib.Error e) { }
+                register_card_for_url(_norm, slide);
                 try {
                     if (meta_cache != null) {
                         bool was = false;
@@ -1945,8 +2081,10 @@ public class NewsWindow : Adw.ApplicationWindow {
             if (initial_phase) pending_images++;
             // Caller retains image-load logic; register picture for in-place updates
             image_handler.load_image_async(article_card.image, thumbnail_url, img_w * multiplier, img_h * multiplier);
-            url_to_picture.set(_norm, article_card.image);
+            register_picture_for_url(_norm, article_card.image);
             normalized_to_url.set(_norm, url);
+            // Register the card mapping so overlays (Viewed badge) can be attached
+            register_card_for_url(_norm, article_card.root);
         } else {
             if (category_id == "local_news") {
                 set_local_placeholder_image(article_card.image, img_w, img_h);
@@ -1955,9 +2093,8 @@ public class NewsWindow : Adw.ApplicationWindow {
             }
         }
 
-        // Map normalized URL -> card widget for overlays/badges and viewed state
-        try { url_to_card.set(_norm, article_card.root); } catch (GLib.Error e) { }
-        try { append_debug_log("url_to_card.set: card mapping url=" + _norm + " widget=card"); } catch (GLib.Error e) { }
+    // Map normalized URL -> card widget for overlays/badges and viewed state
+    register_card_for_url(_norm, article_card.root);
         try {
             if (meta_cache != null) {
                 bool was = false;
@@ -2778,13 +2915,24 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
     }
 
-    private void show_error_message() {
+    // Track whether any fetchers reported a network-related failure during
+    // the current fetch sequence. Fetching code will emit error labels like
+    // "... Error loading ..." which we detect and use to present a more
+    // specific offline message when the global timeout fires.
+    private bool network_failure_detected = false;
+
+    // Show the global error overlay. If `msg` is provided it will be shown
+    // in the overlay label; otherwise we use a generic "no articles" text.
+    private void show_error_message(string? msg = null) {
         if (error_message_box != null) {
             // Hide loading spinner and other overlays
             try { hide_loading_spinner(); } catch (GLib.Error e) { }
             try { if (personalized_message_box != null) personalized_message_box.set_visible(false); } catch (GLib.Error e) { }
             try { if (local_news_message_box != null) local_news_message_box.set_visible(false); } catch (GLib.Error e) { }
             try { if (main_content_container != null) main_content_container.set_visible(false); } catch (GLib.Error e) { }
+
+            if (msg == null) msg = "No articles could be loaded. Try refreshing or check your source settings.";
+            try { if (error_message_label != null && msg != null) error_message_label.set_text(msg); } catch (GLib.Error e) { }
             error_message_box.set_visible(true);
         }
     }
@@ -3041,6 +3189,8 @@ public class NewsWindow : Adw.ApplicationWindow {
         hero_image_loaded = false;
         pending_images = 0;
         initial_items_populated = false;
+    // Reset per-fetch network failure tracking
+    network_failure_detected = false;
         if (initial_reveal_timeout_id > 0) {
             Source.remove(initial_reveal_timeout_id);
             initial_reveal_timeout_id = 0;
@@ -3062,8 +3212,16 @@ public class NewsWindow : Adw.ApplicationWindow {
         initial_reveal_timeout_id = Timeout.add(INITIAL_MAX_WAIT_MS, () => {
             // Timeout reached; check if we got any items
             if (!self_ref.initial_items_populated) {
-                // No articles received - show error
-                try { self_ref.show_error_message(); } catch (GLib.Error e) { }
+                // No articles received - show error. Prefer an offline-specific
+                // message if any fetchers reported network failures during
+                // this fetch sequence.
+                try {
+                    if (self_ref.network_failure_detected) {
+                        self_ref.show_error_message("No network connection detected. Check your connection and try again.");
+                    } else {
+                        self_ref.show_error_message();
+                    }
+                } catch (GLib.Error e) { }
             } else {
                 // Reveal content even if some images haven't finished
                 self_ref.reveal_initial_content();
@@ -3096,6 +3254,20 @@ public class NewsWindow : Adw.ApplicationWindow {
                     try { if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) append_debug_log("wrapped_set_label: ignoring stale seq=" + my_seq.to_string() + " current=" + self_ref.fetch_sequence.to_string()); } catch (GLib.Error e) { }
                     return false;
                 }
+                // Detect error-like labels emitted by fetchers and mark a
+                // network failure flag so the timeout can present a more
+                // specific offline message. Many fetchers call set_label
+                // with "... Error loading ..." when network issues occur.
+                try {
+                    if (text != null) {
+                        string lower = text.down();
+                        if (lower.index_of("error") >= 0 || lower.index_of("failed") >= 0) {
+                            self_ref.network_failure_detected = true;
+                            try { append_debug_log("DEBUG: wrapped_set_label detected error label='" + text + "'"); } catch (GLib.Error e) { }
+                        }
+                    }
+                } catch (GLib.Error e) { }
+
                 // Use the centralized header updater which enforces the exact
                 // UI contract (icon + category, or Search Results when active).
                 try { self_ref.update_content_header(); } catch (GLib.Error e) { }

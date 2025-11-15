@@ -286,22 +286,31 @@ public class NewsSources {
                             // top-level fields for compatibility.
                             string source_name = "Paperboy API";
                             string? logo_url = null;
+                            string provider_key = "";
+                            string? provider_url = null;
                             if (art.has_member("source")) {
                                 var src_node = art.get_member("source");
                                 if (src_node != null && src_node.get_node_type() == Json.NodeType.OBJECT) {
                                     var src_obj = src_node.get_object();
-                                    // typical fields: name, title, url, logo_url
+                                    // typical fields: name, title, url, logo_url, id
                                     string? n = json_get_string_safe(src_obj, "name");
                                     if (n == null) n = json_get_string_safe(src_obj, "title");
                                     if (n != null) source_name = n;
+                                    // pick a provider key when available (prefer explicit `id`)
+                                    string? sid = json_get_string_safe(src_obj, "id");
+                                    if (sid != null && sid.length > 0) provider_key = sid;
+                                    else if (n != null && n.length > 0) provider_key = n;
                                     // logo fields on the nested source object
                                     if (json_get_string_safe(src_obj, "logo_url") != null) logo_url = json_get_string_safe(src_obj, "logo_url");
                                     else if (json_get_string_safe(src_obj, "logo") != null) logo_url = json_get_string_safe(src_obj, "logo");
                                     else if (json_get_string_safe(src_obj, "favicon") != null) logo_url = json_get_string_safe(src_obj, "favicon");
-                                    // If provider included a URL field, prefer it as a display hint
-                                    if (source_name == null || source_name.length == 0) {
-                                        string? provurl = json_get_string_safe(src_obj, "url");
-                                        if (provurl != null) {
+                                    // Capture provider URL when present and use it as a
+                                    // hint for display name if the provider didn't
+                                    // supply an explicit name.
+                                    string? provurl = json_get_string_safe(src_obj, "url");
+                                    if (provurl != null) {
+                                        provider_url = provurl;
+                                        if (source_name == null || source_name.length == 0) {
                                             string inferred = infer_display_name_from_url(provurl);
                                             if (inferred.length > 0) source_name = inferred;
                                         }
@@ -310,11 +319,13 @@ public class NewsSources {
                                     // `source` exists but is not an object: try as string
                                     string? s = json_get_string_safe(art, "source");
                                     if (s != null) source_name = s;
+                                    if (source_name != null) provider_key = source_name;
                                 }
                             } else {
                                 // legacy/top-level provider fields
                                 if (json_get_string_safe(art, "source") != null) source_name = json_get_string_safe(art, "source");
                                 else if (json_get_string_safe(art, "provider") != null) source_name = json_get_string_safe(art, "provider");
+                                if (source_name != null) provider_key = source_name;
                             }
 
                             // If backend returned a generic placeholder (or nothing),
@@ -342,6 +353,16 @@ public class NewsSources {
                                 logo_url = "https:" + logo_url;
                             }
                         }
+
+                        // If we were able to derive a provider key/display-name and
+                        // the backend supplied a logo URL, record it into the
+                        // canonical index and start a background fetch to ensure
+                        // the canonical filename exists under user data.
+                        try {
+                            if (provider_key.length > 0 && logo_url != null && logo_url.length > 0) {
+                                SourceLogos.update_index_and_fetch(provider_key, source_name, logo_url, provider_url, session);
+                            }
+                        } catch (GLib.Error e) { }
 
                         // If we have a logo URL, encode it into the source_name using
                         // a small delimiter so the UI can detect and download/cache it.

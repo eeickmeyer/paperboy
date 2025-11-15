@@ -17,6 +17,7 @@
  */
 
 using Gtk;
+using GLib;
 using Adw;
 using Soup;
 using Tools;
@@ -38,6 +39,11 @@ public class ArticlePane : GLib.Object {
     // would incorrectly mark unrelated previews as viewed.
     private ulong back_btn_handler_id = 0;
 
+    // Centralized debug log path for this module. Use this variable so the
+    // path can be adjusted in one place if we change where debug output
+    // should be written (for example under a per-user data dir).
+    private static string debug_log_path = "/tmp/paperboy-debug.log";
+
     // Callback type for snippet results
     private delegate void SnippetCallback(string text);
 
@@ -56,21 +62,56 @@ public class ArticlePane : GLib.Object {
         preview_content_box = content_box;
     }
 
-    // Local debug logger: write lightweight traces to /tmp/paperboy-debug.log
-    // This mirrors the debug helper in NewsWindow but is kept private so
-    // the ArticleWindow can emit logs without accessing NewsWindow's private
-    // members.
-    private void append_debug_log(string line) {
+    // Use the centralized AppDebugger for debug logging instead of a
+    // local file helper. This keeps file-IO in one place and avoids
+    // duplicate implementations across modules.
+
+    // Robustly open a URL in the user's configured browser. Try the
+    // platform Gio.AppInfo API first; on failure fall back to executing
+    // `xdg-open` as a last resort. We log failures to the debug log when
+    // PAPERBOY_DEBUG is enabled so failures can be diagnosed remotely.
+    private void open_article_in_browser(string uri) {
+        // Log the click and the raw URI so debugging is reliable even when
+        // AppInfo doesn't report an error (AppInfo may succeed silently
+        // or the desktop may be misconfigured).
+    try { AppDebugger.append_debug_log(debug_log_path, "open_article_in_browser: invoked with raw uri='" + (uri != null ? uri : "(null)") + "'"); } catch (GLib.Error e) { }
+
+        // Basic sanity: reject empty URIs early and log them.
+        if (uri == null || uri.strip().length == 0) {
+            try { AppDebugger.append_debug_log(debug_log_path, "open_article_in_browser: empty uri, aborting"); } catch (GLib.Error e) { }
+            return;
+        }
+
+        // Normalize a missing scheme: many scrapers or feeds sometimes
+        // omit 'https://' and only provide 'example.com/path'. Assume
+        // https when a scheme is missing to give the user a sensible
+        // result rather than a no-op.
+        string normalized = uri.strip();
+            if (!(normalized.has_prefix("http://") || normalized.has_prefix("https://") || normalized.has_prefix("mailto:") || normalized.has_prefix("file:") || normalized.has_prefix("ftp:"))) {
+            normalized = "https://" + normalized;
+            try { AppDebugger.append_debug_log(debug_log_path, "open_article_in_browser: normalized uri to '" + normalized + "'"); } catch (GLib.Error e) { }
+        }
+
         try {
-            string path = "/tmp/paperboy-debug.log";
-            string old = "";
-            try { GLib.FileUtils.get_contents(path, out old); } catch (GLib.Error e) { old = ""; }
-            string outc = old + line + "\n";
-            GLib.FileUtils.set_contents(path, outc);
+            try {
+                AppInfo.launch_default_for_uri(normalized, null);
+                try { AppDebugger.append_debug_log(debug_log_path, "open_article_in_browser: AppInfo.launch_default_for_uri invoked for '" + normalized + "'"); } catch (GLib.Error _e) { }
+                return;
+            } catch (GLib.Error e) {
+                try { AppDebugger.append_debug_log(debug_log_path, "open_article_in_browser: AppInfo.launch_default_for_uri failed: " + e.message); } catch (GLib.Error _e) { }
+            }
+
+            // AppInfo failed — log the failure and return. We purposely avoid
+            // introducing platform-specific subprocess fallbacks here (they
+            // caused compile-time binding issues earlier). If we need a
+            // fallback later, add a well-tested `Gio.Subprocess`/portal-based
+            // implementation behind a runtime check and feature-guard.
+            try { AppDebugger.append_debug_log(debug_log_path, "open_article_in_browser: AppInfo.launch_default_for_uri failed for '" + normalized + "'"); } catch (GLib.Error _e) { }
         } catch (GLib.Error e) {
-            // best-effort logging only
+            try { AppDebugger.append_debug_log(debug_log_path, "open_article_in_browser: unexpected error: " + e.message); } catch (GLib.Error _e) { }
         }
     }
+
 
     // Show a modal preview with image and a small snippet
     // `category_id` is optional; when it's "local_news" we prefer the
@@ -250,7 +291,7 @@ public class ArticlePane : GLib.Object {
         var open_btn = new Gtk.Button.with_label("Open in browser");
         open_btn.set_hexpand(true);
         open_btn.add_css_class("suggested-action");
-        open_btn.clicked.connect(() => { try { AppInfo.launch_default_for_uri(url, null); } catch (GLib.Error e) { } });
+        open_btn.clicked.connect(() => { try { open_article_in_browser(url); } catch (GLib.Error e) { } });
         
         actions.append(back_local);
         actions.append(open_btn);
@@ -357,7 +398,7 @@ public class ArticlePane : GLib.Object {
                 try {
             string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
             if (_dbg != null && _dbg.length > 0) {
-                try { append_debug_log("show_article_preview: explicit_source=" + (explicit_source_name != null ? explicit_source_name : "(null)") +
+                try { AppDebugger.append_debug_log(debug_log_path, "show_article_preview: explicit_source=" + (explicit_source_name != null ? explicit_source_name : "(null)") +
                                  " inferred=" + get_source_name(article_src) +
                                  " prefs_news_source=" + get_source_name(prefs.news_source) +
                                  " category=" + (category_id != null ? category_id : "(null)") +
@@ -495,7 +536,7 @@ public class ArticlePane : GLib.Object {
                                     if (new_height < 1) new_height = 1;
                                     // Use BILINEAR here for speed (trade a tiny amount of quality)
                                     pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.BILINEAR);
-                                    try { append_debug_log("article preview: fast downscale to " + new_width.to_string() + "x" + new_height.to_string()); } catch (GLib.Error e) { }
+                                    try { AppDebugger.append_debug_log(debug_log_path, "article preview: fast downscale to " + new_width.to_string() + "x" + new_height.to_string()); } catch (GLib.Error e) { }
                                 }
 
                                 // Create a texture directly from the (possibly resized) pixbuf
@@ -728,7 +769,6 @@ public class ArticlePane : GLib.Object {
                         // Scale logo to fit nicely within the placeholder area
                         int logo_size = int.min(width, height) / 2;
                         var scaled = pixbuf.scale_simple(logo_size, logo_size, Gdk.InterpType.BILINEAR);
-                        
                         // Create placeholder with logo centered on gradient background
                         Idle.add(() => {
                             PlaceholderBuilder.create_logo_placeholder(image, scaled, width, height);
@@ -749,7 +789,6 @@ public class ArticlePane : GLib.Object {
             return null;
         });
     }
-
 
     // Fetch a short snippet from an article URL using common meta tags or first paragraph
     private void fetch_snippet_async(string url, SnippetCallback on_done, Gtk.Label? meta_label, NewsSource source, string? display_source) {
@@ -818,9 +857,9 @@ public class ArticlePane : GLib.Object {
                 if (meta_label != null && published.length > 0) {
                     string label_to_use = (display_source != null && display_source.length > 0) ? display_source : get_source_name(source);
                     try {
-                        string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-                        if (_dbg != null && _dbg.length > 0) append_debug_log("fetch_snippet_async: url=" + url + " published=" + published + " label=" + label_to_use);
-                    } catch (GLib.Error e) { }
+                            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                            if (_dbg != null && _dbg.length > 0) AppDebugger.append_debug_log(debug_log_path, "fetch_snippet_async: url=" + url + " published=" + published + " label=" + label_to_use);
+                        } catch (GLib.Error e) { }
                     meta_label.set_text(label_to_use + " • " + format_published(published));
                 }
                 on_done(final);

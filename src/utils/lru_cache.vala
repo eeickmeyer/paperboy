@@ -8,6 +8,12 @@ public class LruCache<K, V> : GLib.Object {
     private Gee.HashMap<K, V> map;
     private Gee.ArrayList<K> order;
     private int capacity;
+    // Optional eviction callback invoked when entries are removed due to
+    // capacity limits or explicit clear/remove. Callers can use this to
+    // release resources or log heavy textures. Kept optional to remain
+    // backwards-compatible.
+    public delegate void EvictionCallback<K, V>(K key, V value);
+    private EvictionCallback<K, V>? on_evict;
 
     public LruCache(int capacity) {
         GLib.Object();
@@ -15,6 +21,11 @@ public class LruCache<K, V> : GLib.Object {
         this.capacity = capacity;
         map = new Gee.HashMap<K, V>();
         order = new Gee.ArrayList<K>();
+    }
+
+    // Set an optional eviction callback. Passing null clears the callback.
+    public void set_eviction_callback(EvictionCallback<K, V>? cb) {
+        on_evict = cb;
     }
 
     // Retrieve a value or null if missing. Marks the key as recently used.
@@ -53,7 +64,29 @@ public class LruCache<K, V> : GLib.Object {
             while (order.size > capacity) {
                 K oldest = order.get(0);
                 order.remove_at(0);
-                try { map.remove(oldest); } catch (GLib.Error e) { }
+                try {
+                    V? val = null;
+                    try { val = map.get(oldest); } catch (GLib.Error e) { val = null; }
+                    try { map.remove(oldest); } catch (GLib.Error e) { }
+                    // Notify caller about eviction (best-effort)
+                    try {
+                        if (on_evict != null && val != null) on_evict(oldest, val);
+                    } catch (GLib.Error e) { }
+                    // Optional debug output when PAPERBOY_DEBUG is set (best-effort)
+                    try {
+                        string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                        if (dbg != null && dbg.length > 0) {
+                            // Best-effort stringify the key for debug output; if the
+                            // key isn't a string, print a placeholder to avoid
+                            // compile-time typing issues with generic K.
+                            string key_s = "<non-string>";
+                            try {
+                                if (oldest is string) key_s = (string) oldest;
+                            } catch (GLib.Error _e) { }
+                            print("DEBUG: LruCache.evicted key=%s\n", key_s);
+                        }
+                    } catch (GLib.Error e) { }
+                } catch (GLib.Error e) { }
             }
         } catch (GLib.Error e) {
             // best-effort: ignore cache failures
@@ -65,13 +98,29 @@ public class LruCache<K, V> : GLib.Object {
         bool r = false;
         try {
             try { order.remove(key); } catch (GLib.Error e) { }
+            V? val = null;
+            try { val = map.get(key); } catch (GLib.Error e) { val = null; }
             r = map.remove(key);
+            try {
+                if (on_evict != null && val != null) on_evict(key, val);
+            } catch (GLib.Error e) { }
         } catch (GLib.Error e) { r = false; }
         return r;
     }
 
     public void clear() {
         try {
+            // Notify for each entry before clearing so callers can release
+            // resources tied to the cached values.
+            try {
+                for (int i = 0; i < order.size; i++) {
+                    K k = order.get(i);
+                    V? v = null;
+                    try { v = map.get(k); } catch (GLib.Error e) { v = null; }
+                    try { if (on_evict != null && v != null) on_evict(k, v); } catch (GLib.Error e) { }
+                }
+            } catch (GLib.Error e) { }
+
             order.clear();
             map.clear();
         } catch (GLib.Error e) { }
@@ -92,7 +141,12 @@ public class LruCache<K, V> : GLib.Object {
         while (order.size > capacity) {
             K oldest = order.get(0);
             order.remove_at(0);
-            try { map.remove(oldest); } catch (GLib.Error e) { }
+            try {
+                V? val = null;
+                try { val = map.get(oldest); } catch (GLib.Error e) { val = null; }
+                try { map.remove(oldest); } catch (GLib.Error e) { }
+                try { if (on_evict != null && val != null) on_evict(oldest, val); } catch (GLib.Error e) { }
+            } catch (GLib.Error e) { }
         }
     }
 

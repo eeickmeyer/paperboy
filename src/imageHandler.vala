@@ -174,6 +174,7 @@ public class ImageHandler : GLib.Object {
                                         try {
                                             var texture = Gdk.Texture.for_pixbuf(pb_for_idle);
                                             if (pb_for_idle.get_width() <= 64 && pb_for_idle.get_height() <= 64) window.memory_meta_cache.set(url, texture);
+
                                             var list2 = window.pending_downloads.get(url);
                                             if (list2 != null) {
                                                 foreach (var pic in list2) {
@@ -448,11 +449,40 @@ public class ImageHandler : GLib.Object {
         if (existing != null) {
             window.append_debug_log("load_image_async: pending download exists, enqueueing url=" + url + " size=" + target_w.to_string() + "x" + target_h.to_string());
             existing.add(image);
+            // Ensure we don't keep destroyed widgets in the pending list:
+            try {
+                image.destroy.connect(() => {
+                    try {
+                        var cur = window.pending_downloads.get(url);
+                        if (cur != null) {
+                            try { cur.remove(image); } catch (GLib.Error e) { }
+                            if (cur.size == 0) {
+                                try { window.pending_downloads.remove(url); } catch (GLib.Error e) { }
+                            }
+                        }
+                    } catch (GLib.Error e) { }
+                });
+            } catch (GLib.Error e) { }
             return;
         }
 
         var list = new Gee.ArrayList<Gtk.Picture>();
         list.add(image);
+        // If this picture is destroyed while the download is pending, remove it
+        // from the pending list so we don't retain references to dead widgets.
+        try {
+            image.destroy.connect(() => {
+                try {
+                    var cur = window.pending_downloads.get(url);
+                    if (cur != null) {
+                        try { cur.remove(image); } catch (GLib.Error e) { }
+                        if (cur.size == 0) {
+                            try { window.pending_downloads.remove(url); } catch (GLib.Error e) { }
+                        }
+                    }
+                } catch (GLib.Error e) { }
+            });
+        } catch (GLib.Error e) { }
         window.pending_downloads.set(url, list);
         window.append_debug_log("load_image_async: queued download url=" + url + " size=" + target_w.to_string() + "x" + target_h.to_string());
         window.requested_image_sizes.set(url, "%dx%d".printf(target_w, target_h));

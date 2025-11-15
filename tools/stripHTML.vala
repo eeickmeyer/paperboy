@@ -36,10 +36,16 @@ public class HtmlUtils {
         out = out.replace("&#X2018;", "'");
         out = out.replace("&#8216;", "'");
         out = out.replace("&#8217;", "'");
+        // Some feeds use a three-digit decimal entity with a leading zero (e.g. &#039;)
+        // Normalize that common variant to an apostrophe as well.
+        out = out.replace("&#039;", "'");
         out = out.replace("&#x201C;", "\""); // left double quotation mark
         out = out.replace("&#X201C;", "\""); // left double quotation mark (uppercase)
         out = out.replace("&#x201D;", "\""); // right double quotation mark
         out = out.replace("&#X201D;", "\""); // right double quotation mark (uppercase)
+        // Decimal variants for left/right double quotation marks (e.g. &#8220; / &#8221;)
+        out = out.replace("&#8220;", "\"");
+        out = out.replace("&#8221;", "\"");
         out = out.replace("&#x2013;", "–"); // en dash
         out = out.replace("&#X2013;", "–"); // en dash (uppercase)
         out = out.replace("&#x2014;", "—"); // em dash
