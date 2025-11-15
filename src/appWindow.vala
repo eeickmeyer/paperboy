@@ -153,7 +153,8 @@ public class NewsWindow : Adw.ApplicationWindow {
     public MetaCache? meta_cache;
 
     // In-memory image cache (URL -> Gdk.Texture) to avoid repeated decodes during a session
-    public Gee.HashMap<string, Gdk.Texture> memory_meta_cache;
+    // Use a small LRU cache to bound memory usage and evict old textures.
+    public LruCache<string, Gdk.Texture> memory_meta_cache;
     // Track the last requested size for each URL so we can upgrade images
     // after the initial phase without re-scanning the UI.
     public Gee.HashMap<string, string> requested_image_sizes;
@@ -493,8 +494,9 @@ public class NewsWindow : Adw.ApplicationWindow {
         normalized_to_url = new Gee.HashMap<string, string>();
         // Track viewed articles in this session
         viewed_articles = new Gee.HashSet<string>();
-        // Initialize in-memory cache and pending-downloads map
-        memory_meta_cache = new Gee.HashMap<string, Gdk.Texture>();
+    // Initialize in-memory cache and pending-downloads map
+    // Capacity chosen conservatively to limit RAM usage; tune if needed.
+    memory_meta_cache = new LruCache<string, Gdk.Texture>(200);
         requested_image_sizes = new Gee.HashMap<string, string>();
         pending_downloads = new Gee.HashMap<string, Gee.ArrayList<Gtk.Picture>>();
         deferred_downloads = new Gee.HashMap<Gtk.Picture, DeferredRequest>();
@@ -864,22 +866,44 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Add keyboard event controller for closing article preview with Escape
         var key_controller = new Gtk.EventControllerKey();
         key_controller.key_pressed.connect((keyval, keycode, state) => {
+            // Escape: close preview
             if (keyval == Gdk.Key.Escape && back_btn.get_visible()) {
-                // Close article preview if it's open
                 article_preview_split.set_show_sidebar(false);
                 back_btn.set_visible(false);
-                // Call preview_closed to properly mark viewed and restore scroll
                 try {
                     if (last_previewed_url != null && last_previewed_url.length > 0) {
                         preview_closed(last_previewed_url);
                     } else {
                         dim_overlay.set_visible(false);
                     }
-                } catch (GLib.Error e) { 
+                } catch (GLib.Error e) {
                     dim_overlay.set_visible(false);
                 }
                 return true;
             }
+
+            // Debug-only shortcuts: require PAPERBOY_DEBUG env var to be set
+            try {
+                string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (dbg != null && dbg.length > 0) {
+                    // Ctrl+Shift+L -> dump cache stats (Ctrl+Shift+D conflicts with GTK inspector)
+                    bool ctrl = (state & Gdk.ModifierType.CONTROL_MASK) != 0;
+                    bool shift = (state & Gdk.ModifierType.SHIFT_MASK) != 0;
+                    if (ctrl && shift && keyval == Gdk.Key.L) {
+                        try { debug_dump_cache_stats(); } catch (GLib.Error e) { }
+                        return true;
+                    }
+                    // Ctrl+Shift+K -> clear memory cache
+                    if (ctrl && shift && keyval == Gdk.Key.K) {
+                        try {
+                            memory_meta_cache.clear();
+                            append_debug_log("DEBUG: memory_meta_cache cleared via keyboard");
+                        } catch (GLib.Error e) { }
+                        return true;
+                    }
+                }
+            } catch (GLib.Error e) { }
+
             return false;
         });
         nav_view.add_controller(key_controller);
@@ -956,6 +980,44 @@ public class NewsWindow : Adw.ApplicationWindow {
         if (back_btn != null && back_btn.get_visible()) {
             if (nav_view != null) nav_view.pop();
             back_btn.set_visible(false);
+        }
+    }
+
+    // Debug helper: dump memory cache stats and counts of widget-held textures.
+    // This is a best-effort diagnostic and is intended to be called only when
+    // PAPERBOY_DEBUG is set. It logs to the debug log path via append_debug_log().
+    public void debug_dump_cache_stats() {
+        try {
+            int cache_size = 0;
+            try { cache_size = memory_meta_cache.size(); } catch (GLib.Error e) { cache_size = -1; }
+            append_debug_log("DEBUG: memory_meta_cache.size=" + cache_size.to_string());
+
+            // Count unique textures referenced by registered Picture widgets
+            int widget_tex_count = 0;
+            try {
+                var set = new Gee.HashSet<Gdk.Texture>();
+                foreach (var kv in url_to_picture.entries) {
+                    try {
+                        var pic = kv.value;
+                        var p = pic.get_paintable();
+                        if (p is Gdk.Texture) {
+                            set.add((Gdk.Texture)p);
+                        }
+                    } catch (GLib.Error e) { }
+                }
+                widget_tex_count = set.size;
+            } catch (GLib.Error e) { widget_tex_count = -1; }
+
+            append_debug_log("DEBUG: unique_textures_referenced_by_widgets=" + widget_tex_count.to_string());
+
+            // Report total registered pictures and pending downloads
+            int pictures_registered = 0;
+            try { pictures_registered = url_to_picture.size; } catch (GLib.Error e) { pictures_registered = -1; }
+            int pending = 0;
+            try { pending = pending_downloads.size; } catch (GLib.Error e) { pending = -1; }
+            append_debug_log("DEBUG: url_to_picture.count=" + pictures_registered.to_string() + " pending_downloads.count=" + pending.to_string());
+        } catch (GLib.Error e) {
+            // best-effort only
         }
     }
 
@@ -2322,9 +2384,14 @@ public class NewsWindow : Adw.ApplicationWindow {
         box.set_margin_top(8);
         box.set_margin_end(8);
 
-        try {
+            try {
             var icon = new Gtk.Image.from_icon_name("emblem-ok-symbolic");
-            icon.set_pixel_size(14);
+            // Force a small fixed pixel size so symbolic icons don't scale oddly
+            // in overlay contexts (prevents vertical stretching on hero slides)
+            try { icon.set_pixel_size(12); } catch (GLib.Error e) { }
+            // Tag the icon so CSS can target the inner circular wrap specifically
+            try { icon.get_style_context().add_class("viewed-badge-icon"); } catch (GLib.Error e) { }
+            try { icon.set_valign(Gtk.Align.CENTER); icon.set_halign(Gtk.Align.CENTER); } catch (GLib.Error e) { }
             box.append(icon);
         } catch (GLib.Error e) { }
 

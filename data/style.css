@@ -84,7 +84,7 @@
 .viewed-badge image,
 .viewed-badge picture,
 .viewed-badge .icon {
-    background-color: black;
+    background-color: rgb(26, 126, 64);
     color: white; /* symbolic icons inherit this color */
     border-radius: 50%;
     width: 16px;
@@ -94,8 +94,24 @@
     padding: 1px;
     box-sizing: border-box;
     display: inline-flex;
+    /* add a subtle transparent white border so the green indicator is visually contained */
+    border: 1px solid rgba(255, 255, 255, 0.25);
     align-items: center;
     justify-content: center;
+}
+
+/* Ensure the icon area stays perfectly square and doesn't stretch
+   vertically due to line-height or flex growth. Adding an enforced
+   aspect-ratio and preventing the element from flexing fixes cases
+   where the widget is laid out by the toolkit and ends up oval. */
+.viewed-badge image,
+.viewed-badge picture,
+.viewed-badge .icon {
+    aspect-ratio: 1 / 1;
+    flex: 0 0 auto;
+    line-height: 0;
+    max-width: 100%;
+    max-height: 100%;
 }
 
 /* Ensure the label text inside the badge is white, not dimmed, and doesn't inherit theme-dim styles */
@@ -116,6 +132,11 @@
     opacity: 1 !important;
     filter: none !important;
 }
+
+/* For featured/hero cards, give badges more breathing room so they don't
+   get clipped or overlap the rounded card corners. This increases padding
+   and lifts badges away from text areas. */
+/* (no featured-specific overrides here; keep default badge sizing) */
 
 /* Circular wrapper for dynamic remote source logos used by dynamic badges.
    Ensures logos are clipped to a circle and scale to fill the area. */
@@ -170,10 +191,13 @@
    from the widget bottom) which effectively lifts the badge up, and
    reduce font/padding to keep it unobtrusive. */
 .hero-badge {
-    font-size: 0.75em;
-    padding: 2px 6px;
+    /* Slightly larger horizontal padding and gap for hero badges so they
+       don't appear visually squashed on wide hero slides. Kept conservative
+       to avoid changing non-hero badge visuals. */
+    font-size: 0.85em;
+    padding: 4px 10px;
     margin-bottom: 44px; /* lift up to avoid crowded titles */
-    gap: 4px;
+    gap: 6px;
     box-shadow: 0 2px 6px rgba(0,0,0,0.18);
 }
 
