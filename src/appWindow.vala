@@ -532,8 +532,8 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Track viewed articles in this session
         viewed_articles = new Gee.HashSet<string>();
     // Initialize in-memory cache and pending-downloads map
-    // Capacity chosen conservatively to limit RAM usage; tune if needed.
-    memory_meta_cache = new LruCache<string, Gdk.Texture>(200);
+    // Capacity reduced from 200 to 50 to prevent memory bloat (textures are large)
+    memory_meta_cache = new LruCache<string, Gdk.Texture>(50);
         // Eviction callback: log evictions when PAPERBOY_DEBUG is set so we can
         // correlate evicted keys with resident memory. Keep lightweight.
         try {
@@ -2945,11 +2945,13 @@ public class NewsWindow : Adw.ApplicationWindow {
 
     // Recreate the columns for masonry layout with a new count
     private void rebuild_columns(int count) {
-        // Remove any existing column widgets from the row
+        // Remove and destroy existing column widgets to free memory
         Gtk.Widget? child = columns_row.get_first_child();
         while (child != null) {
             Gtk.Widget? next = child.get_next_sibling();
             columns_row.remove(child);
+            // Force widget destruction to release texture references
+            child.unparent();
             child = next;
         }
 
@@ -3188,6 +3190,39 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
     }
 
+    // Clean up memory by releasing old textures and widget references
+    private void cleanup_old_content() {
+        // Force clear all Picture widgets to release texture references
+        foreach (var pic in url_to_picture.values) {
+            pic.set_paintable(null);
+        }
+        
+        // Clear URL-to-widget mappings (these should auto-cleanup via destroy signals, but ensure)
+        url_to_picture.clear();
+        url_to_card.clear();
+        normalized_to_url.clear();
+        
+        // Clear pending downloads
+        pending_downloads.clear();
+        
+        // Clear hero requests
+        hero_requests.clear();
+        
+        // Clear deferred downloads
+        deferred_downloads.clear();
+        
+        // Clear requested image sizes
+        requested_image_sizes.clear();
+        
+        // CRITICAL: Clear the memory texture cache to free large textures
+        memory_meta_cache.clear();
+        
+        // Clear disk meta cache
+        if (meta_cache != null) {
+            meta_cache.clear();
+        }
+    }
+
     public void fetch_news() {
         // Debug: log fetch_news invocation and current sequence
         try {
@@ -3200,11 +3235,12 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Ensure sidebar visibility reflects current source
         update_sidebar_for_source();
         // Clear featured hero and randomize columns count per fetch between 2 and 4 for extra variety
-        // Clear featured
+        // Clear featured and destroy widgets
         Gtk.Widget? fchild = featured_box.get_first_child();
         while (fchild != null) {
             Gtk.Widget? next = fchild.get_next_sibling();
             featured_box.remove(fchild);
+            fchild.unparent();
             fchild = next;
         }
         featured_used = false;
@@ -3224,20 +3260,22 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Clear hero_container for Top Ten (remove all children including featured_box)
         // For other categories, hero_container should just have featured_box
         if (prefs.category == "topten") {
-            // Remove all children from hero_container (including leftover featured_box)
+            // Remove and destroy all children from hero_container
             Gtk.Widget? hchild = hero_container.get_first_child();
             while (hchild != null) {
                 Gtk.Widget? next = hchild.get_next_sibling();
                 hero_container.remove(hchild);
+                hchild.unparent();
                 hchild = next;
             }
             topten_hero_count = 0;
         } else {
-            // For non-topten views, clear everything first then add featured_box
+            // For non-topten views, clear and destroy everything first then add featured_box
             Gtk.Widget? hchild = hero_container.get_first_child();
             while (hchild != null) {
                 Gtk.Widget? next = hchild.get_next_sibling();
                 hero_container.remove(hchild);
+                hchild.unparent();
                 hchild = next;
             }
             // Now add featured_box for carousel
@@ -3251,6 +3289,9 @@ public class NewsWindow : Adw.ApplicationWindow {
         } else {
             rebuild_columns(3); // Standard masonry
         }
+        
+        // Clean up memory: clear image caches and widget references
+        cleanup_old_content();
         
         // Reset category distribution tracking for new content
         category_column_counts.clear();
