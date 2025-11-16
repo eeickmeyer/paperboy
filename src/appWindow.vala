@@ -720,9 +720,11 @@ public class NewsWindow : Adw.ApplicationWindow {
     article_preview_split = new Adw.OverlaySplitView();
     article_preview_split.set_show_sidebar(false);
     article_preview_split.set_sidebar_position(Gtk.PackType.END); // Right side
-    article_preview_split.set_max_sidebar_width(480);  // 20% thinner (was 600)
-    article_preview_split.set_min_sidebar_width(320);  // 20% thinner (was 400)
-    article_preview_split.set_sidebar_width_fraction(0.32);  // 20% thinner (was 0.4)
+    // Make the slide-out preview slightly wider (+5% from the trimmed size)
+    // User requested a small increase for better legibility.
+    article_preview_split.set_max_sidebar_width(420);
+    article_preview_split.set_min_sidebar_width(294);
+    article_preview_split.set_sidebar_width_fraction(0.29);
     article_preview_split.set_collapsed(true); // Always overlay, never push content
     article_preview_split.set_enable_show_gesture(false); // Disable swipe to prevent accidental opens
     article_preview_split.set_enable_hide_gesture(true);  // Allow swipe to close
