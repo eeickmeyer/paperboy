@@ -95,10 +95,9 @@ public class MetaCache : GLib.Object {
     pending_meta_checks = new Gee.HashSet<string>();
     meta_check_queue = new Gee.ArrayList<string>();
 
-    // Preload metadata directory in a background thread to populate the
-    // viewed_meta_paths set so subsequent is_viewed() calls can be fast
-    // and non-blocking on the main loop.
-    new Thread<void*>("meta-preload", () => {
+    // Preload metadata directory using WorkerPool to avoid thread creation overhead
+    var pool = WorkerPool.get_default();
+    pool.submit(() => {
         try {
             var meta_dir = File.new_for_path(cache_dir_path);
             FileEnumerator? en = null;
@@ -127,13 +126,11 @@ public class MetaCache : GLib.Object {
                 if (en != null) try { en.close(null); } catch (GLib.Error e) { }
             }
         } catch (GLib.Error e) { }
-        return null;
     });
 
     // Start a single persistent background worker that consumes
-    // `meta_check_queue` items and performs read_meta() calls. This avoids
-    // the previous approach of creating a short-lived thread per missing
-    // meta file which caused large thread churn under heavy loads.
+    // `meta_check_queue` items and performs read_meta() calls. This worker
+    // runs continuously, so it stays as a dedicated thread (not pooled).
     new Thread<void*>("meta-worker", () => {
         while (true) {
             string? url_to_check = null;
@@ -381,9 +378,10 @@ public class MetaCache : GLib.Object {
 
     string? img = null;
     if (ext != null) img = image_write_path_for(url, ext);
-        // Ensure parent dir exists (constructor already attempted, but be safe)
+        // Ensure parent dirs exist (constructor already attempted, but be safe)
         try {
             DirUtils.create_with_parents(cache_dir_path, 0755);
+            DirUtils.create_with_parents(images_dir_path, 0755);
         } catch (GLib.Error e) { /* best-effort */ }
 
         if (img != null) {

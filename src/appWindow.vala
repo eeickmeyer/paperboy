@@ -158,6 +158,8 @@ public class NewsWindow : Adw.ApplicationWindow {
     // In-memory image cache (URL -> Gdk.Texture) to avoid repeated decodes during a session
     // Use a small LRU cache to bound memory usage and evict old textures.
     public LruCache<string, Gdk.Texture> memory_meta_cache;
+    // Separate fast cache for small thumbnails (≤64px) to improve hit rate
+    public LruCache<string, Gdk.Texture> thumbnail_cache;
     // Track the last requested size for each URL so we can upgrade images
     // after the initial phase without re-scanning the UI.
     public Gee.HashMap<string, string> requested_image_sizes;
@@ -193,7 +195,8 @@ public class NewsWindow : Adw.ApplicationWindow {
     
     // Article count and "Load More" functionality
     private int articles_shown = 0;
-    private const int INITIAL_ARTICLE_LIMIT = 30;
+    private int articles_pending = 0;  // Articles queued but not yet rendered
+    private const int INITIAL_ARTICLE_LIMIT = 25;  // Show 25 articles initially, rest behind Load More
     private Gtk.Button? load_more_button = null;
     private uint buffer_flush_timeout_id = 0;
     // Fetch sequencing token to ignore stale background fetch callbacks
@@ -532,8 +535,11 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Track viewed articles in this session
         viewed_articles = new Gee.HashSet<string>();
     // Initialize in-memory cache and pending-downloads map
-    // Capacity reduced from 200 to 50 to prevent memory bloat (textures are large)
-    memory_meta_cache = new LruCache<string, Gdk.Texture>(50);
+    // Capacity reduced to 30 (from 50) to prevent memory bloat with multiple sources
+    // With all sources enabled, this prevents caching 200+ images in RAM
+    memory_meta_cache = new LruCache<string, Gdk.Texture>(30);
+        // Separate thumbnail cache for small images (50 items) - improves hit rate
+        thumbnail_cache = new LruCache<string, Gdk.Texture>(50);
         // Eviction callback: log evictions when PAPERBOY_DEBUG is set so we can
         // correlate evicted keys with resident memory. Keep lightweight.
         try {
@@ -737,8 +743,8 @@ public class NewsWindow : Adw.ApplicationWindow {
 
     // Split view: sidebar + content with adaptive collapsible sidebar
     split_view = new Adw.NavigationSplitView();
-    split_view.set_min_sidebar_width(280);
-    split_view.set_max_sidebar_width(280);
+    split_view.set_min_sidebar_width(266);
+    split_view.set_max_sidebar_width(266);
     split_view.set_sidebar(sidebar_page);
     // Wrap content in a NavigationView so we can slide in a preview page
     nav_view = new Adw.NavigationView();
@@ -1493,6 +1499,69 @@ public class NewsWindow : Adw.ApplicationWindow {
     }
 
     private void add_item(string title, string url, string? thumbnail_url, string category_id, string? source_name) {
+        // Debug: log all add_item calls for topten
+        try {
+            string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+            if (dbg != null && dbg.length > 0 && prefs.category == "topten") {
+                append_debug_log("add_item called for TOPTEN: category_id=" + category_id + " title=" + title);
+            }
+        } catch (GLib.Error e) { }
+        
+        // ONLY apply limit when user is VIEWING a specific category (world, sports, etc.)
+        // Do NOT limit for: frontpage, topten, all, myfeed, local_news
+        bool viewing_limited_category = (
+            prefs.category == "general" || 
+            prefs.category == "us" || 
+            prefs.category == "sports" || 
+            prefs.category == "science" || 
+            prefs.category == "health" || 
+            prefs.category == "technology" || 
+            prefs.category == "business" || 
+            prefs.category == "entertainment" || 
+            prefs.category == "politics" ||
+            prefs.category == "markets" ||
+            prefs.category == "industries" ||
+            prefs.category == "economics" ||
+            prefs.category == "wealth" ||
+            prefs.category == "green"
+        );
+        
+        if (viewing_limited_category) {
+            // Use lock to make check-and-increment atomic across multiple sources
+            lock (articles_shown) {
+                try {
+                    string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                    if (dbg != null && dbg.length > 0) {
+                        append_debug_log("add_item LOCK: shown=" + articles_shown.to_string() + " limit=" + INITIAL_ARTICLE_LIMIT.to_string() + " title=" + title);
+                    }
+                } catch (GLib.Error e) { }
+                
+                if (articles_shown >= INITIAL_ARTICLE_LIMIT && load_more_button == null) {
+                    try {
+                        string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                        if (dbg != null && dbg.length > 0) {
+                            append_debug_log("add_item BLOCKING at " + articles_shown.to_string() + ": " + title);
+                        }
+                    } catch (GLib.Error e) { }
+                    // Queue this article for Load More instead of displaying it
+                    if (remaining_articles == null) {
+                        remaining_articles = new ArticleItem[1];
+                        remaining_articles[0] = new ArticleItem(title, url, thumbnail_url, category_id, source_name);
+                    } else {
+                        // Append to existing array
+                        var new_arr = new ArticleItem[remaining_articles.length + 1];
+                        for (int i = 0; i < remaining_articles.length; i++) {
+                            new_arr[i] = remaining_articles[i];
+                        }
+                        new_arr[remaining_articles.length] = new ArticleItem(title, url, thumbnail_url, category_id, source_name);
+                        remaining_articles = new_arr;
+                    }
+                    show_load_more_button();
+                    return; // Don't add to UI, save for Load More
+                }
+            }
+        }
+        
         // Ensure we have a sensible per-item source name. If callers didn't
         // provide one, infer from the URL. For Local News items prefer the
         // user-configured city name when available so previews/readers show
@@ -1630,7 +1699,8 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Map the inferred source to the preference id strings and drop any
         // articles that come from sources the user hasn't enabled. This
         // protects against fetchers that may return cross-domain results.
-        if (category_id != "frontpage" && category_id != "topten" && prefs.preferred_sources != null && prefs.preferred_sources.size > 0) {
+        // Skip filtering for frontpage and topten views
+        if (prefs.category != "frontpage" && prefs.category != "topten" && category_id != "frontpage" && category_id != "topten" && prefs.preferred_sources != null && prefs.preferred_sources.size > 0) {
             NewsSource article_src = infer_source_from_url(url);
             string article_src_id = "";
             switch (article_src) {
@@ -1653,6 +1723,15 @@ public class NewsWindow : Adw.ApplicationWindow {
                 }
                 if (!allowed_src) {
                     if (debug_enabled()) warning("Dropping article from unselected source %s title=%s", article_src_id, title);
+                    try {
+                        string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                        if (dbg != null && dbg.length > 0) {
+                            append_debug_log("add_item DROPPED (source filter): view=" + prefs.category + " source=" + article_src_id + " title=" + title);
+                            if (prefs.category == "topten") {
+                                append_debug_log("TOPTEN ARTICLE DROPPED BY SOURCE FILTER: " + title);
+                            }
+                        }
+                    } catch (GLib.Error e) { }
                     return;
                 }
             }
@@ -1672,6 +1751,15 @@ public class NewsWindow : Adw.ApplicationWindow {
                 NewsSource article_src = infer_source_from_url(url);
                 if (article_src != NewsSource.BLOOMBERG) {
                     if (debug_enabled()) warning("Dropping non-Bloomberg article for Bloomberg-only category %s title=%s", category_id, title);
+                    try {
+                        string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                        if (dbg != null && dbg.length > 0) {
+                            append_debug_log("add_item DROPPED (Bloomberg filter): view=" + prefs.category + " category=" + category_id + " title=" + title);
+                            if (prefs.category == "topten") {
+                                append_debug_log("TOPTEN ARTICLE DROPPED BY BLOOMBERG FILTER: " + title);
+                            }
+                        }
+                    } catch (GLib.Error e) { }
                     return;
                 }
             }
@@ -1715,6 +1803,12 @@ public class NewsWindow : Adw.ApplicationWindow {
             });
         } else {
             // For specific categories, add directly
+            try {
+                string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (dbg != null && dbg.length > 0 && prefs.category == "topten") {
+                    append_debug_log("TOPTEN: About to call add_item_immediate_to_column for: " + title);
+                }
+            } catch (GLib.Error e) { }
             add_item_immediate_to_column(title, url, thumbnail_url, category_id, -1, null, final_source_name);
         }
     }
@@ -1747,22 +1841,9 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
         
         // Now add them in shuffled order with simple round-robin distribution
-        // But respect the article limit for Load More functionality
+        // No article limit for "all" category - add everything
         int articles_added = 0;
         for (int i = 0; i < articles.length; i++) {
-            // Check if we've reached the limit before adding more articles
-            if (articles_shown >= INITIAL_ARTICLE_LIMIT && load_more_button == null) {
-                // Store remaining articles for Load More functionality
-                int remaining_count = articles.length - i;
-                remaining_articles = new ArticleItem[remaining_count];
-                for (int j = 0; j < remaining_count; j++) {
-                    remaining_articles[j] = articles[i + j];
-                }
-                remaining_articles_index = 0;
-                show_load_more_button();
-                break; // Stop adding articles until user clicks "Load More"
-            }
-            
             var article = articles[i];
             add_item_shuffled(article.title, article.url, article.thumbnail_url, article.category_id, article.source_name);
             articles_added++;
@@ -1791,8 +1872,16 @@ public class NewsWindow : Adw.ApplicationWindow {
         prefs.category = saved_category; // Restore
     }
     
-    private void add_item_immediate_to_column(string title, string url, string? thumbnail_url, string category_id, int forced_column = -1, string? original_category = null, string? source_name = null) {
-    // Check article limit for "All Categories" mode FIRST
+    private void add_item_immediate_to_column(string title, string url, string? thumbnail_url, string category_id, int forced_column = -1, string? original_category = null, string? source_name = null, bool bypass_limit = false) {
+    // Debug: log for topten
+    try {
+        string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+        if (dbg != null && dbg.length > 0 && prefs.category == "topten") {
+            append_debug_log("add_item_immediate_to_column called for TOPTEN: category_id=" + category_id + " title=" + title);
+        }
+    } catch (GLib.Error e) { }
+    
+    // Check article limit FIRST for ALL categories (not just "all")
     // Debug: log incoming per-article source_name and URL when debugging is enabled
     try {
         string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
@@ -1801,11 +1890,96 @@ public class NewsWindow : Adw.ApplicationWindow {
             append_debug_log("add_item_immediate_to_column: incoming_source_name=" + in_src + " url=" + (url != null ? url : "<null>") + " category=" + category_id + " title=" + title);
         }
     } catch (GLib.Error e) { }
+    
+        // Check if we're viewing a limited category and enforce the limit
         // Use original_category if provided (for when category is temporarily overridden)
         string check_category = original_category ?? prefs.category;
-        if (check_category == "all" && articles_shown >= INITIAL_ARTICLE_LIMIT && load_more_button == null) {
-            show_load_more_button();
-            return; // Stop adding articles until user clicks "Load More"
+        
+        try {
+            string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+            if (dbg != null && dbg.length > 0) {
+                append_debug_log("add_item_immediate_to_column: prefs.category=" + prefs.category + " original_category=" + (original_category != null ? original_category : "null") + " check_category=" + check_category + " article_cat=" + category_id);
+            }
+        } catch (GLib.Error e) { }
+        
+        bool is_limited_category = (
+            check_category == "general" || 
+            check_category == "us" || 
+            check_category == "sports" || 
+            check_category == "science" || 
+            check_category == "health" || 
+            check_category == "technology" || 
+            check_category == "business" || 
+            check_category == "entertainment" || 
+            check_category == "politics" ||
+            check_category == "markets" ||
+            check_category == "industries" ||
+            check_category == "economics" ||
+            check_category == "wealth" ||
+            check_category == "green"
+        );
+        
+        try {
+            string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+            if (dbg != null && dbg.length > 0) {
+                append_debug_log("add_item_immediate_to_column: check_category=" + check_category + " is_limited=" + (is_limited_category ? "YES" : "NO") + " title=" + title);
+            }
+        } catch (GLib.Error e) { }
+        
+        if (is_limited_category && !bypass_limit) {
+            // CRITICAL: Lock to make check-and-increment atomic
+            lock (articles_shown) {
+                try {
+                    string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                    if (dbg != null && dbg.length > 0) {
+                        append_debug_log("add_item_immediate_to_column LOCK: shown=" + articles_shown.to_string() + " limit=" + INITIAL_ARTICLE_LIMIT.to_string() + " category=" + check_category + " button=" + (load_more_button == null ? "null" : "EXISTS") + " title=" + title);
+                    }
+                } catch (GLib.Error e) { }
+                
+                if (articles_shown >= INITIAL_ARTICLE_LIMIT) {
+                    try {
+                        string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                        if (dbg != null && dbg.length > 0) {
+                            append_debug_log("add_item_immediate_to_column BLOCKING at " + articles_shown.to_string() + ": " + title);
+                        }
+                    } catch (GLib.Error e) { }
+                    
+                    // Validate parameters before creating ArticleItem
+                    if (title == null || url == null) {
+                        return; // Skip invalid articles
+                    }
+                    
+                    // Queue this article for Load More instead of displaying it
+                    if (remaining_articles == null) {
+                        remaining_articles = new ArticleItem[1];
+                        remaining_articles[0] = new ArticleItem(title, url, thumbnail_url, category_id, source_name);
+                    } else {
+                        // Append to existing array
+                        var new_arr = new ArticleItem[remaining_articles.length + 1];
+                        for (int i = 0; i < remaining_articles.length; i++) {
+                            new_arr[i] = remaining_articles[i];
+                        }
+                        new_arr[remaining_articles.length] = new ArticleItem(title, url, thumbnail_url, category_id, source_name);
+                        remaining_articles = new_arr;
+                    }
+                    
+                    // Show button only if it doesn't exist yet
+                    if (load_more_button == null) {
+                        show_load_more_button();
+                    }
+                    return; // Don't add to UI, save for Load More
+                }
+                
+                // Increment immediately to reserve slot
+                articles_shown++;
+                
+                try {
+                    string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                    if (dbg != null && dbg.length > 0) {
+                        append_debug_log("add_item_immediate_to_column INCREMENTED to " + articles_shown.to_string() + " category=" + check_category + " title=" + title);
+                    }
+                } catch (GLib.Error e) { }
+            }
         }
         
         // Smart column selection for "All Categories" to prevent category clustering
@@ -2206,8 +2380,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
         columns[target_col].append(article_card.root);
 
-        string current_category = original_category ?? prefs.category;
-        if (current_category == "all") articles_shown++;
+        // articles_shown already incremented in the lock above - no need to increment again
 
         int estimated_card_h = img_h + 120;
         column_heights[target_col] += estimated_card_h + 12;
@@ -2975,6 +3148,22 @@ public class NewsWindow : Adw.ApplicationWindow {
     
     private void show_loading_spinner() {
         if (loading_container != null && loading_spinner != null && loading_label != null) {
+            // Remove "No more articles" message when starting a new load
+            var children = content_box.observe_children();
+            for (uint i = 0; i < children.get_n_items(); i++) {
+                var child = children.get_item(i) as Gtk.Widget;
+                if (child is Gtk.Label) {
+                    var label = child as Gtk.Label;
+                    if (label.get_label() == "<b>No more articles</b>") {
+                        content_box.remove(label);
+                        break;
+                    }
+                }
+            }
+            
+            // Hide My Feed instructions if switching away from My Feed
+            update_personalization_ui();
+            
             // If we're fetching Local News, show a more specific message
             try {
                 var prefs_local = NewsPreferences.get_instance();
@@ -3004,6 +3193,20 @@ public class NewsWindow : Adw.ApplicationWindow {
             // and local-news overlay logic which will hide content when needed.
             try { update_personalization_ui(); } catch (GLib.Error e) { }
             try { update_local_news_ui(); } catch (GLib.Error e) { }
+            
+            // Show Load More button if we have remaining articles and hit the limit
+            if (remaining_articles != null && remaining_articles.length > 0 && articles_shown >= INITIAL_ARTICLE_LIMIT) {
+                show_load_more_button();
+            } else if (remaining_articles == null || remaining_articles.length == 0) {
+                // No remaining articles, show end message after content is fully loaded
+                Timeout.add(800, () => {
+                    // Double-check spinner is still hidden before showing message
+                    if (loading_container == null || !loading_container.get_visible()) {
+                        show_end_of_feed_message();
+                    }
+                    return false;
+                });
+            }
         }
     }
 
@@ -3074,14 +3277,22 @@ public class NewsWindow : Adw.ApplicationWindow {
     // start its download. This runs on the main loop and reschedules itself
     // only when there are remaining deferred requests.
     public void process_deferred_downloads() {
+        // Process only a few at a time to avoid scroll jank
+        const int MAX_BATCH = 5;
+        int processed = 0;
+        
         // Collect to-start entries to avoid modifying map while iterating
         var to_start = new Gee.ArrayList<Gtk.Picture>();
         foreach (var kv in deferred_downloads.entries) {
+            if (processed >= MAX_BATCH) break;
             Gtk.Picture pic = kv.key;
             DeferredRequest req = kv.value;
             bool vis = false;
             try { vis = pic.get_visible(); } catch (GLib.Error e) { vis = true; }
-            if (vis) to_start.add(pic);
+            if (vis) {
+                to_start.add(pic);
+                processed++;
+            }
         }
 
         foreach (var pic in to_start) {
@@ -3095,7 +3306,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         // If there are still deferred entries, schedule another check
         if (deferred_downloads.size > 0) {
             if (deferred_check_timeout_id == 0) {
-                deferred_check_timeout_id = Timeout.add(700, () => {
+                deferred_check_timeout_id = Timeout.add(1200, () => {
                     try { process_deferred_downloads(); } catch (GLib.Error e) { }
                     deferred_check_timeout_id = 0;
                     return false;
@@ -3216,6 +3427,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         
         // CRITICAL: Clear the memory texture cache to free large textures
         memory_meta_cache.clear();
+        thumbnail_cache.clear();
         
         // Clear disk meta cache
         if (meta_cache != null) {
@@ -3467,6 +3679,20 @@ public class NewsWindow : Adw.ApplicationWindow {
                 }
                 // Reset load-more state
                 self_ref.article_buffer.clear();
+                
+                // Remove "No more articles" message if it exists
+                var children = self_ref.content_box.observe_children();
+                for (uint i = 0; i < children.get_n_items(); i++) {
+                    var child = children.get_item(i) as Gtk.Widget;
+                    if (child is Gtk.Label) {
+                        var label = child as Gtk.Label;
+                        if (label.get_label() == "<b>No more articles</b>") {
+                            self_ref.content_box.remove(label);
+                            break;
+                        }
+                    }
+                }
+                
                 // Also clear image bookkeeping so subsequent fetches create
                 // fresh widgets instead of updating removed ones.
                 try { self_ref.url_to_picture.clear(); } catch (GLib.Error e) { }
@@ -3495,6 +3721,41 @@ public class NewsWindow : Adw.ApplicationWindow {
         bool ui_add_idle_scheduled = false;
 
     AddItemFunc wrapped_add = (title, url, thumbnail, category_id, source_name) => {
+            // Debug: log all wrapped_add calls for topten
+            try {
+                string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (dbg != null && dbg.length > 0 && self_ref.prefs.category == "topten") {
+                    self_ref.append_debug_log("wrapped_add called for TOPTEN: category_id=" + category_id + " title=" + title);
+                }
+            } catch (GLib.Error e) { }
+            
+            // Check article limit ONLY for limited categories, NOT frontpage/topten/all
+            bool viewing_limited_category = (
+                self_ref.prefs.category == "general" || 
+                self_ref.prefs.category == "us" || 
+                self_ref.prefs.category == "sports" || 
+                self_ref.prefs.category == "science" || 
+                self_ref.prefs.category == "health" || 
+                self_ref.prefs.category == "technology" || 
+                self_ref.prefs.category == "business" || 
+                self_ref.prefs.category == "entertainment" || 
+                self_ref.prefs.category == "politics" ||
+                self_ref.prefs.category == "markets" ||
+                self_ref.prefs.category == "industries" ||
+                self_ref.prefs.category == "economics" ||
+                self_ref.prefs.category == "wealth" ||
+                self_ref.prefs.category == "green"
+            );
+            
+            try {
+                string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (dbg != null && dbg.length > 0) {
+                    self_ref.append_debug_log("wrapped_add: category=" + self_ref.prefs.category + " shown=" + self_ref.articles_shown.to_string() + " limit=" + INITIAL_ARTICLE_LIMIT.to_string() + " is_limited=" + (viewing_limited_category ? "YES" : "NO") + " has_button=" + (self_ref.load_more_button != null ? "yes" : "no") + " title=" + title);
+                }
+            } catch (GLib.Error e) { }
+            
+            // Don't check limit here - let add_item_immediate_to_column() handle it after filtering
+            
             // If we're in Local News mode, enqueue and process in small batches to avoid UI lockups
             try {
                 var prefs_local = NewsPreferences.get_instance();
@@ -3547,11 +3808,64 @@ public class NewsWindow : Adw.ApplicationWindow {
                 Idle.add(() => {
                     int processed = 0;
                     const int BATCH = 8; // process up to 8 items per tick
+                    
+                    // Check if we're viewing a limited category
+                    bool is_limited_cat = (
+                        self_ref.prefs.category == "general" || 
+                        self_ref.prefs.category == "us" || 
+                        self_ref.prefs.category == "sports" || 
+                        self_ref.prefs.category == "science" || 
+                        self_ref.prefs.category == "health" || 
+                        self_ref.prefs.category == "technology" || 
+                        self_ref.prefs.category == "business" || 
+                        self_ref.prefs.category == "entertainment" || 
+                        self_ref.prefs.category == "politics" ||
+                        self_ref.prefs.category == "markets" ||
+                        self_ref.prefs.category == "industries" ||
+                        self_ref.prefs.category == "economics" ||
+                        self_ref.prefs.category == "wealth" ||
+                        self_ref.prefs.category == "green"
+                    );
+                    
                     while (ui_add_queue.size > 0 && processed < BATCH) {
+                        // Only enforce limit for specific categories
+                        if (is_limited_cat && self_ref.articles_shown >= INITIAL_ARTICLE_LIMIT) {
+                            // Transfer remaining items to remaining_articles array
+                            while (ui_add_queue.size > 0) {
+                                ArticleItem? x = null;
+                                try { x = ui_add_queue.get(0); } catch (GLib.Error e) { x = null; }
+                                if (x == null) break;
+                                try { ui_add_queue.remove_at(0); } catch (GLib.Error e) { }
+                                
+                                // Add to remaining articles array
+                                if (self_ref.remaining_articles == null) {
+                                    self_ref.remaining_articles = new ArticleItem[1];
+                                    self_ref.remaining_articles[0] = x;
+                                } else {
+                                    var new_arr = new ArticleItem[self_ref.remaining_articles.length + 1];
+                                    for (int i = 0; i < self_ref.remaining_articles.length; i++) {
+                                        new_arr[i] = self_ref.remaining_articles[i];
+                                    }
+                                    new_arr[self_ref.remaining_articles.length] = x;
+                                    self_ref.remaining_articles = new_arr;
+                                }
+                            }
+                            
+                            // Show the Load More button only if it doesn't exist
+                            if (self_ref.load_more_button == null) {
+                                self_ref.show_load_more_button();
+                            }
+                            ui_add_idle_scheduled = false;
+                            try { self_ref.unref(); } catch (GLib.Error e) { }
+                            return false;
+                        }
+                        
                         ArticleItem? x = null;
                         try { x = ui_add_queue.get(0); } catch (GLib.Error e) { x = null; }
                         if (x == null) break;
-                        try { ui_add_queue.remove_at(0); } catch (GLib.Error e) { }
+                        try { 
+                            ui_add_queue.remove_at(0);
+                        } catch (GLib.Error e) { }
                         // Ensure still current before adding
                         if (my_seq == self_ref.fetch_sequence) {
                             try { self_ref.add_item(x.title, x.url, x.thumbnail_url, x.category_id, x.source_name); } catch (GLib.Error e) { }
@@ -4028,11 +4342,41 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
     }
 
+    private void show_end_of_feed_message() {
+        // Check if message already exists
+        var children = content_box.observe_children();
+        for (uint i = 0; i < children.get_n_items(); i++) {
+            var child = children.get_item(i) as Gtk.Widget;
+            if (child is Gtk.Label) {
+                var label = child as Gtk.Label;
+                // Check both the markup and the CSS class to identify our message
+                var label_text = label.get_label();
+                if ((label_text == "<b>No more articles</b>" || label_text == "No more articles") 
+                    && label.has_css_class("dim-label")) {
+                    return; // Already shown
+                }
+            }
+        }
+        
+        var end_label = new Gtk.Label("<b>No more articles</b>");
+        end_label.set_use_markup(true);
+        end_label.add_css_class("dim-label");
+        end_label.set_margin_top(20);
+        end_label.set_margin_bottom(20);
+        end_label.set_halign(Gtk.Align.CENTER);
+        content_box.append(end_label);
+    }
+
     private void show_load_more_button() {
         if (load_more_button != null) return; // Already shown
         
+        // Don't show button while loading spinner is active
+        if (loading_container != null && loading_container.get_visible()) {
+            return;
+        }
+        
         // Create Load More button
-        load_more_button = new Gtk.Button.with_label("Load More Articles");
+        load_more_button = new Gtk.Button.with_label("Load more articles");
         load_more_button.add_css_class("suggested-action");
         load_more_button.add_css_class("pill");
         load_more_button.set_margin_top(20);
@@ -4068,7 +4412,7 @@ public class NewsWindow : Adw.ApplicationWindow {
     
     private void load_more_articles() {
         if (remaining_articles == null || remaining_articles_index >= remaining_articles.length) {
-            // No more articles to load, remove button
+            // No more articles to load, replace button with end message
             if (load_more_button != null) {
                 load_more_button.add_css_class("fade-out");
                 Timeout.add(300, () => {
@@ -4078,6 +4422,11 @@ public class NewsWindow : Adw.ApplicationWindow {
                             parent.remove(load_more_button);
                         }
                         load_more_button = null;
+                        
+                        // Show end message only if spinner is not visible
+                        if (loading_container == null || !loading_container.get_visible()) {
+                            show_end_of_feed_message();
+                        }
                     }
                     return false;
                 });
@@ -4085,12 +4434,13 @@ public class NewsWindow : Adw.ApplicationWindow {
             return;
         }
         
-        // Load another batch of articles (15 more)
-        int articles_to_load = int.min(INITIAL_ARTICLE_LIMIT, remaining_articles.length - remaining_articles_index);
+        // Load another batch of articles (10 more, reduced from 15 to manage memory)
+        int articles_to_load = int.min(10, remaining_articles.length - remaining_articles_index);
         
         for (int i = 0; i < articles_to_load; i++) {
             var article = remaining_articles[remaining_articles_index + i];
-            add_item_shuffled(article.title, article.url, article.thumbnail_url, article.category_id, article.source_name);
+            // Add directly without going through limiting logic
+            add_item_immediate_to_column(article.title, article.url, article.thumbnail_url, article.category_id, -1, null, article.source_name, true);
         }
         
         remaining_articles_index += articles_to_load;
@@ -4111,6 +4461,14 @@ public class NewsWindow : Adw.ApplicationWindow {
                 if (remaining_articles_index < remaining_articles.length) {
                     Timeout.add(500, () => {
                         show_load_more_button();
+                        return false;
+                    });
+                } else {
+                    // No more articles, show end message only if spinner is not visible
+                    Timeout.add(500, () => {
+                        if (loading_container == null || !loading_container.get_visible()) {
+                            show_end_of_feed_message();
+                        }
                         return false;
                     });
                 }

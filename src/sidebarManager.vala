@@ -150,6 +150,7 @@ public class SidebarManager : GLib.Object {
         var header_row = new Adw.ActionRow();
         header_row.set_title(title);
         header_row.activatable = false;
+        header_row.selectable = false;
         header_row.add_css_class("caption-heading");
         header_row.set_margin_top(12);
         header_row.set_margin_bottom(6);

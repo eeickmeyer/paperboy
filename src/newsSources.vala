@@ -528,10 +528,12 @@ public class NewsSources {
                     set_label("Top Ten — Paperboy");
                     clear_items();
                     uint len = articles.get_length();
-                    // Limit to 10 articles for Top Ten layout
-                    if (len > 10) len = 10;
                     
-                    for (uint i = 0; i < len; i++) {
+                    // Track seen URLs to skip duplicates (backend sometimes sends duplicate articles)
+                    var seen_urls = new Gee.HashSet<string>();
+                    int added_count = 0;
+                    
+                    for (uint i = 0; i < len && added_count < 10; i++) {
                         var art = articles.get_element(i).get_object();
                         string title = json_get_string_safe(art, "title") != null ? json_get_string_safe(art, "title") : (json_get_string_safe(art, "headline") != null ? json_get_string_safe(art, "headline") : "No title");
                         string article_url = json_get_string_safe(art, "url") != null ? json_get_string_safe(art, "url") : (json_get_string_safe(art, "link") != null ? json_get_string_safe(art, "link") : "");
@@ -656,7 +658,14 @@ public class NewsSources {
                         if (display_source == null) display_source = "";
                         display_source = display_source + "##category::" + category_id;
 
+                        // Skip duplicates based on URL
+                        if (seen_urls.contains(article_url)) {
+                            continue;
+                        }
+                        seen_urls.add(article_url);
+                        
                         add_item(title, article_url, thumbnail, "topten", display_source);
+                        added_count++;
                     }
                     return false;
                 });

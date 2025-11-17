@@ -50,6 +50,7 @@ public class ImageHandler : GLib.Object {
         // conservative short-term fix to prevent corrupted closure data from
         // causing crashes; we can replace with a safer pooled implementation
         // later (for example using GLib.ThreadPool or a C-level queue).
+        // CRITICAL: Soup.Message is NOT thread-safe in a shared pool context!
         new Thread<void*>("image-download", () => {
             GLib.AtomicInt.inc(ref NewsWindow.active_downloads);
             try {
@@ -106,7 +107,7 @@ public class ImageHandler : GLib.Object {
                                                 if (nw < 1) nw = 1;
                                                 int nh = (int)(pix.get_height() * sc);
                                                 if (nh < 1) nh = 1;
-                                                try { pix = pix.scale_simple(nw, nh, Gdk.InterpType.HYPER); } catch (GLib.Error e) { }
+                                                try { pix = pix.scale_simple(nw, nh, Gdk.InterpType.BILINEAR); } catch (GLib.Error e) { }
                                             }
                                             string k = window.make_cache_key(url, sw, sh);
                                             var pb_for_idle = pix;
@@ -115,7 +116,7 @@ public class ImageHandler : GLib.Object {
                                                     Gdk.Texture? texture = null;
                                                     texture = Gdk.Texture.for_pixbuf(pb_for_idle);
                                                     window.memory_meta_cache.set(k, texture);
-                                                    if (sw <= 64 && sh <= 64) window.memory_meta_cache.set(url, texture);
+                                                    if (sw <= 64 && sh <= 64) window.thumbnail_cache.set(url, texture);
                                                     try { window.append_debug_log("start_image_download_for_url: 304 cached size_key=" + k + " pix_after=" + pb_for_idle.get_width().to_string() + "x" + pb_for_idle.get_height().to_string()); } catch (GLib.Error e) { }
 
                                                     var list2 = window.pending_downloads.get(url);
@@ -141,7 +142,7 @@ public class ImageHandler : GLib.Object {
                                             Idle.add(() => {
                                                 try {
                                                     var texture = Gdk.Texture.for_pixbuf(pb_for_idle);
-                                                    if (pb_for_idle.get_width() <= 64 && pb_for_idle.get_height() <= 64) window.memory_meta_cache.set(url, texture);
+                                                    if (pb_for_idle.get_width() <= 64 && pb_for_idle.get_height() <= 64) window.thumbnail_cache.set(url, texture);
                                                     var list2 = window.pending_downloads.get(url);
                                                     if (list2 != null) {
                                                         foreach (var pic in list2) {
@@ -173,7 +174,7 @@ public class ImageHandler : GLib.Object {
                                     Idle.add(() => {
                                         try {
                                             var texture = Gdk.Texture.for_pixbuf(pb_for_idle);
-                                            if (pb_for_idle.get_width() <= 64 && pb_for_idle.get_height() <= 64) window.memory_meta_cache.set(url, texture);
+                                            if (pb_for_idle.get_width() <= 64 && pb_for_idle.get_height() <= 64) window.thumbnail_cache.set(url, texture);
 
                                             var list2 = window.pending_downloads.get(url);
                                             if (list2 != null) {
@@ -247,10 +248,10 @@ public class ImageHandler : GLib.Object {
                                 if (new_width < 1) new_width = 1;
                                 int new_height = (int)(height * scale);
                                 if (new_height < 1) new_height = 1;
-                                try { pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.HYPER); } catch (GLib.Error e) { }
+                                try { pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.BILINEAR); } catch (GLib.Error e) { }
                                 try { window.append_debug_log("start_image_download_for_url: scaled-down url=" + url + " to=" + pixbuf.get_width().to_string() + "x" + pixbuf.get_height().to_string()); } catch (GLib.Error e) { }
                             } else if (scale > 1.0) {
-                                double max_upscale = 2.0;
+                                double max_upscale = 1.5;  // Reduced from 2.0 to save memory (4x less pixels)
                                 double upscale = double.min(scale, max_upscale);
                                 int new_width = (int)(width * upscale);
                                 int new_height = (int)(height * upscale);
@@ -372,7 +373,7 @@ public class ImageHandler : GLib.Object {
 
                     window.deferred_downloads.set(image, new DeferredRequest(url, target_w, target_h));
                     if (window.deferred_check_timeout_id == 0) {
-                        window.deferred_check_timeout_id = Timeout.add(500, () => {
+                        window.deferred_check_timeout_id = Timeout.add(1000, () => {
                             try { window.process_deferred_downloads(); } catch (GLib.Error e) { }
                             window.deferred_check_timeout_id = 0;
                             return false;
@@ -384,6 +385,19 @@ public class ImageHandler : GLib.Object {
         }
 
         string key = window.make_cache_key(url, target_w, target_h);
+        
+        // Check thumbnail cache first for small images (faster lookup, better hit rate)
+        if (target_w <= 64 && target_h <= 64) {
+            var thumb_cached = window.thumbnail_cache.get(url);
+            if (thumb_cached != null) {
+                window.append_debug_log("load_image_async: thumbnail cache hit url=" + url);
+                image.set_paintable(thumb_cached);
+                window.on_image_loaded(image);
+                return;
+            }
+        }
+        
+        // Check main memory cache
         var cached = window.memory_meta_cache.get(key);
         if (cached != null) {
             window.append_debug_log("load_image_async: memory cache hit key=" + key + " url=" + url + " size=" + target_w.to_string() + "x" + target_h.to_string());
@@ -426,13 +440,13 @@ public class ImageHandler : GLib.Object {
                                     if (new_w < 1) new_w = 1;
                                     int new_h = (int)(height * scale);
                                     if (new_h < 1) new_h = 1;
-                                    try { pix = pix.scale_simple(new_w, new_h, Gdk.InterpType.HYPER); } catch (GLib.Error e) { }
+                                    try { pix = pix.scale_simple(new_w, new_h, Gdk.InterpType.BILINEAR); } catch (GLib.Error e) { }
                                 }
                                 try { window.append_debug_log("load_image_async: disk-cached path=" + disk_path + " url=" + url + " requested=" + target_w.to_string() + "x" + target_h.to_string() + " device_scale=" + device_scale.to_string() + " pix_after=" + pix.get_width().to_string() + "x" + pix.get_height().to_string()); } catch (GLib.Error e) { }
                                 var tex = Gdk.Texture.for_pixbuf(pix);
                                 string size_key = window.make_cache_key(url, target_w, target_h);
                                 window.memory_meta_cache.set(size_key, tex);
-                                if (target_w <= 64 && target_h <= 64) window.memory_meta_cache.set(url, tex);
+                                if (target_w <= 64 && target_h <= 64) window.thumbnail_cache.set(url, tex);
                                 image.set_paintable(tex);
                                 window.on_image_loaded(image);
                                 try { window.append_debug_log("load_image_async: disk-cached served url=" + url + " size_key=" + size_key); } catch (GLib.Error e) { }
