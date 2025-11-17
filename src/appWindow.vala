@@ -27,13 +27,15 @@ public class ArticleItem : GLib.Object {
     public string? thumbnail_url { get; set; }
     public string category_id { get; set; }
     public string? source_name { get; set; }
+    public string? published { get; set; }
     
-    public ArticleItem(string title, string url, string? thumbnail_url, string category_id, string? source_name = null) {
+    public ArticleItem(string title, string url, string? thumbnail_url, string category_id, string? source_name = null, string? published = null) {
         this.title = title;
         this.url = url;
         this.thumbnail_url = thumbnail_url;
         this.category_id = category_id;
         this.source_name = source_name;
+        this.published = published;
     }
 }
 
@@ -513,7 +515,7 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Set the window icon
         set_icon_name("paperboy");
         // Reasonable default window size that fits well on most screens
-        set_default_size(1425, 925);
+        set_default_size(1400, 925);
         // Initialize RNG for per-card randomization
         rng = new GLib.Rand();
         // Initialize category distribution tracking
@@ -663,6 +665,47 @@ public class NewsWindow : Adw.ApplicationWindow {
             string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
             if (_dbg != null && _dbg.length > 0) append_debug_log("sidebar_activate_cb: category=" + cat + " title=" + title);
         } catch (GLib.Error e) { }
+        
+        // Check if the selected category is supported by at least one source
+        // In multi-source mode, allow if ANY source supports it
+        // In single-source mode, check that specific source
+        bool category_supported = false;
+        if (prefs.preferred_sources != null && prefs.preferred_sources.size > 1) {
+            // Multi-source: check if at least one source supports this category
+            foreach (var id in prefs.preferred_sources) {
+                NewsSource src = NewsSource.GUARDIAN;
+                switch (id) {
+                    case "guardian": src = NewsSource.GUARDIAN; break;
+                    case "reddit": src = NewsSource.REDDIT; break;
+                    case "bbc": src = NewsSource.BBC; break;
+                    case "nytimes": src = NewsSource.NEW_YORK_TIMES; break;
+                    case "wsj": src = NewsSource.WALL_STREET_JOURNAL; break;
+                    case "bloomberg": src = NewsSource.BLOOMBERG; break;
+                    case "reuters": src = NewsSource.REUTERS; break;
+                    case "npr": src = NewsSource.NPR; break;
+                    case "fox": src = NewsSource.FOX; break;
+                }
+                if (NewsSources.supports_category(src, cat)) {
+                    category_supported = true;
+                    break;
+                }
+            }
+        } else {
+            // Single source: check that specific source
+            NewsSource current_source = effective_news_source();
+            category_supported = NewsSources.supports_category(current_source, cat);
+        }
+        
+        if (!category_supported) {
+            cat = "frontpage";
+            try {
+                string? _dbg_redirect = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (_dbg_redirect != null && _dbg_redirect.length > 0) {
+                    append_debug_log("Redirecting to frontpage: category not supported by any selected source");
+                }
+            } catch (GLib.Error e) { }
+        }
+        
         prefs.category = cat;
         try { update_category_icon(); } catch (GLib.Error e) { }
         try {
@@ -1787,6 +1830,19 @@ public class NewsWindow : Adw.ApplicationWindow {
                     return;
                 }
             }
+            
+            // Block lifestyle articles for sources that don't provide them
+            // (Reddit, BBC, Reuters don't have lifestyle content)
+            // This applies in both single-source and multi-source modes
+            if (category_id == "lifestyle") {
+                NewsSource article_src = infer_source_from_url(url);
+                if (article_src == NewsSource.REDDIT || article_src == NewsSource.BBC || article_src == NewsSource.REUTERS) {
+                    if (debug_enabled()) {
+                        warning("Dropping lifestyle article from source that doesn't provide lifestyle: source=%s title=%s", get_source_name(article_src), title);
+                    }
+                    return;
+                }
+            }
 
             // For "All Categories", add to buffer for later shuffling
             var item = new ArticleItem(title, url, thumbnail_url, category_id, final_source_name);
@@ -1802,7 +1858,11 @@ public class NewsWindow : Adw.ApplicationWindow {
                 return false;
             });
         } else {
-            // For specific categories, add directly
+            // For specific categories, add directly but also store in buffer
+            // so article previews can retrieve source names and metadata
+            var item = new ArticleItem(title, url, thumbnail_url, category_id, final_source_name);
+            article_buffer.add(item);
+            
             try {
                 string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
                 if (dbg != null && dbg.length > 0 && prefs.category == "topten") {
@@ -4439,6 +4499,8 @@ public class NewsWindow : Adw.ApplicationWindow {
         
         for (int i = 0; i < articles_to_load; i++) {
             var article = remaining_articles[remaining_articles_index + i];
+            // Add to article_buffer so article pane can find metadata
+            article_buffer.add(article);
             // Add directly without going through limiting logic
             add_item_immediate_to_column(article.title, article.url, article.thumbnail_url, article.category_id, -1, null, article.source_name, true);
         }

@@ -56,6 +56,31 @@ public class SidebarManager : GLib.Object {
             var allowed = new Gee.HashMap<string, bool>();
             string[] default_cats = { "general", "us", "technology", "science", "sports", "health", "entertainment", "politics", "lifestyle" };
             foreach (var c in default_cats) allowed.set(c, true);
+            
+            // Check if at least one source supports lifestyle
+            bool any_source_supports_lifestyle = false;
+            foreach (var id in window.prefs.preferred_sources) {
+                NewsSource src = NewsSource.GUARDIAN; // default
+                switch (id) {
+                    case "guardian": src = NewsSource.GUARDIAN; break;
+                    case "reddit": src = NewsSource.REDDIT; break;
+                    case "bbc": src = NewsSource.BBC; break;
+                    case "nytimes": src = NewsSource.NEW_YORK_TIMES; break;
+                    case "wsj": src = NewsSource.WALL_STREET_JOURNAL; break;
+                    case "bloomberg": src = NewsSource.BLOOMBERG; break;
+                    case "reuters": src = NewsSource.REUTERS; break;
+                    case "npr": src = NewsSource.NPR; break;
+                    case "fox": src = NewsSource.FOX; break;
+                }
+                if (NewsSources.supports_category(src, "lifestyle")) {
+                    any_source_supports_lifestyle = true;
+                }
+            }
+            
+            // If no source supports lifestyle, remove it from allowed categories
+            if (!any_source_supports_lifestyle) {
+                allowed.unset("lifestyle");
+            }
 
             foreach (var id in window.prefs.preferred_sources) {
                 switch (id) {

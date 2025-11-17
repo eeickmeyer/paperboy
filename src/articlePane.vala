@@ -131,9 +131,36 @@ public class ArticlePane : GLib.Object {
         outer.set_vexpand(true);
         outer.set_hexpand(true);
 
-    // Infer source for this article so previews show correct branding when
-    // multiple preferred sources are enabled.
-    NewsSource article_src = infer_source_from_url(url);
+    // Get source from ArticleItem if available, otherwise infer from URL.
+    // This ensures correct branding when multiple sources are enabled.
+    NewsSource article_src = NewsPreferences.get_instance().news_source;
+    string? article_source_name = null;
+    string? article_published = null;
+    bool found_article_item = false;
+    foreach (var item in parent_window.article_buffer) {
+        if (item.url == url && item is ArticleItem) {
+            var ai = (ArticleItem) item;
+            article_source_name = ai.source_name;
+            article_published = ai.published;
+            found_article_item = true;
+            break;
+        }
+    }
+    if (found_article_item && article_source_name != null && article_source_name.length > 0) {
+        // Map source name back to NewsSource enum
+        if (article_source_name == "Reuters" || article_source_name.down().index_of("reuters") >= 0) article_src = NewsSource.REUTERS;
+        else if (article_source_name == "The Guardian" || article_source_name.down().index_of("guardian") >= 0) article_src = NewsSource.GUARDIAN;
+        else if (article_source_name == "BBC News" || article_source_name.down().index_of("bbc") >= 0) article_src = NewsSource.BBC;
+        else if (article_source_name == "NY Times" || article_source_name.down().index_of("nytimes") >= 0) article_src = NewsSource.NEW_YORK_TIMES;
+        else if (article_source_name == "Wall Street Journal" || article_source_name.down().index_of("wsj") >= 0) article_src = NewsSource.WALL_STREET_JOURNAL;
+        else if (article_source_name == "Bloomberg" || article_source_name.down().index_of("bloomberg") >= 0) article_src = NewsSource.BLOOMBERG;
+        else if (article_source_name == "NPR" || article_source_name.down().index_of("npr") >= 0) article_src = NewsSource.NPR;
+        else if (article_source_name == "Fox News" || article_source_name.down().index_of("fox") >= 0) article_src = NewsSource.FOX;
+        else if (article_source_name == "Reddit" || article_source_name.down().index_of("reddit") >= 0) article_src = NewsSource.REDDIT;
+    } else {
+        // Only infer from URL if we didn't find ArticleItem
+        article_src = infer_source_from_url(url);
+    }
 
         // Title label - AT THE TOP
         var title_wrap = new Gtk.Box(Orientation.VERTICAL, 8);
@@ -234,7 +261,7 @@ public class ArticlePane : GLib.Object {
                     }
                 }
             } catch (GLib.Error e) { /* ignore cache errors and continue to load */ }
-            if (!loaded_from_cache) load_image_async(pic, thumbnail_url, target_w, target_h);
+            if (!loaded_from_cache) load_image_async(pic, thumbnail_url, target_w, target_h, article_src);
         }
         pic_box.append(pic);
         outer.append(pic_box);
@@ -307,21 +334,32 @@ public class ArticlePane : GLib.Object {
         try { parent_window.preview_opened(url); } catch (GLib.Error e) { }
         // Try to set metadata from any cached article entry (source + published time)
     var prefs = NewsPreferences.get_instance();
-        string? homepage_published_any = null;
-        string? explicit_source_name = null;
+        string? homepage_published_any = article_published;
+        string? explicit_source_name = article_source_name;
+        
+        // Parse encoded source name (format: "SourceName||logo_url##category::cat")
+        if (explicit_source_name != null && explicit_source_name.length > 0) {
+            int pipe_idx = explicit_source_name.index_of("||");
+            if (pipe_idx >= 0) {
+                explicit_source_name = explicit_source_name.substring(0, pipe_idx);
+            }
+            int cat_idx = explicit_source_name.index_of("##category::");
+            if (cat_idx >= 0) {
+                explicit_source_name = explicit_source_name.substring(0, cat_idx);
+            }
+        }
+        
+        // Also check for NewsArticle entries which may have published dates
         foreach (var item in parent_window.article_buffer) {
             if (item.url == url) {
-                // Prefer explicit per-item source name when available (ArticleItem)
                 try {
-                    if (item is ArticleItem) {
-                        var ai = (ArticleItem) item;
-                        explicit_source_name = ai.source_name;
-                    } else if (item.get_type().name() == "Paperboy.NewsArticle") {
+                    if (item.get_type().name() == "Paperboy.NewsArticle") {
                         var na = (Paperboy.NewsArticle)item;
-                        homepage_published_any = na.published;
+                        if (na.published != null && na.published.length > 0) {
+                            homepage_published_any = na.published;
+                        }
                     }
                 } catch (GLib.Error e) { }
-                // Continue searching to prefer a Paperboy.NewsArticle published time if present
             }
         }
         // Choose a sensible display name for the source. Prefer an explicit
@@ -330,7 +368,7 @@ public class ArticlePane : GLib.Object {
         // user's default (e.g. NewsPreferences.news_source) while multiple
         // preferred sources are enabled, try to derive a host-based name
         // from the article URL so we don't incorrectly show a specific
-    // provider like "The Guardian".
+        // provider like "The Guardian".
         string display_source = null;
         if (explicit_source_name != null && explicit_source_name.length > 0) {
             display_source = explicit_source_name;
@@ -422,7 +460,7 @@ public class ArticlePane : GLib.Object {
         
     }
 
-    private void load_image_async(Gtk.Picture image, string url, int target_w, int target_h) {
+    private void load_image_async(Gtk.Picture image, string url, int target_w, int target_h, NewsSource source) {
         // Helper for preview cache keys
         string make_preview_cache_key(string u, int w, int h) {
             return u + "@" + w.to_string() + "x" + h.to_string();
@@ -451,10 +489,10 @@ public class ArticlePane : GLib.Object {
                 // status received
                 
                 // Skip extremely large images to prevent slowdowns (especially for Reddit)
-                if (prefs_instance.news_source == NewsSource.REDDIT && msg.response_body.length > 2 * 1024 * 1024) {
+                if (source == NewsSource.REDDIT && msg.response_body.length > 2 * 1024 * 1024) {
                     print("Skipping large Reddit image (%ld bytes), using placeholder\n", (long)msg.response_body.length);
                     Idle.add(() => {
-                        PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, NewsPreferences.get_instance().news_source);
+                        PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, source);
                         return false;
                     });
                     return null;
@@ -528,25 +566,25 @@ public class ArticlePane : GLib.Object {
                                 } catch (GLib.Error e) { /* best-effort cache */ }
                                 } else {
                                 // pixbuf null -> use placeholder
-                                PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, NewsPreferences.get_instance().news_source);
+                                PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, source);
                             }
                         } catch (GLib.Error e) {
                             // error loading image
-                            PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, NewsPreferences.get_instance().news_source);
+                            PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, source);
                         }
                         return false;
                     });
                 } else {
                     // HTTP error or empty body
                     Idle.add(() => {
-                        PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, NewsPreferences.get_instance().news_source);
+                        PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, source);
                         return false;
                     });
                 }
             } catch (GLib.Error e) {
                 // download error
                 Idle.add(() => {
-                    PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, NewsPreferences.get_instance().news_source);
+                    PlaceholderBuilder.set_placeholder_image_for_source(image, target_w, target_h, source);
                     return false;
                 });
             }

@@ -796,9 +796,9 @@ public class NewsSources {
         // Only Bloomberg needs special handling: it exposes a narrower set
         // of dedicated sections. All other sources can be considered to
         // support the common categories (and many use site-search fallbacks).
-        // BBC does not provide a dedicated "lifestyle" RSS feed; hide that
-        // category for BBC so the UI won't show it when BBC is selected.
-        if (source == NewsSource.BBC) {
+        // BBC, Reddit, and Reuters do not provide dedicated "lifestyle" content;
+        // hide that category for these sources so the UI won't show it.
+        if (source == NewsSource.BBC || source == NewsSource.REDDIT || source == NewsSource.REUTERS) {
             if (category == "lifestyle") return false;
         }
 

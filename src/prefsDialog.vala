@@ -1018,6 +1018,47 @@ public class PrefsDialog : GLib.Object {
                         // was open or we auto-enabled Guardian, or we changed
                         // the persisted news_source, trigger a single fetch.
                         if (sources_changed || did_auto_enable || did_change_news_source || categories_changed || personalization_toggled) {
+                            // If sources changed, validate that current category is still supported
+                            if (sources_changed) {
+                                string current_category = prefs.category;
+                                // Check if current category is supported by any enabled source
+                                bool category_supported = false;
+                                
+                                // Get list of enabled sources
+                                if (prefs.preferred_sources != null && prefs.preferred_sources.size > 0) {
+                                    foreach (string source_id in prefs.preferred_sources) {
+                                        NewsSource source;
+                                        switch (source_id) {
+                                            case "guardian": source = NewsSource.GUARDIAN; break;
+                                            case "reddit": source = NewsSource.REDDIT; break;
+                                            case "bbc": source = NewsSource.BBC; break;
+                                            case "nytimes": source = NewsSource.NEW_YORK_TIMES; break;
+                                            case "wsj": source = NewsSource.WALL_STREET_JOURNAL; break;
+                                            case "bloomberg": source = NewsSource.BLOOMBERG; break;
+                                            case "reuters": source = NewsSource.REUTERS; break;
+                                            case "npr": source = NewsSource.NPR; break;
+                                            case "fox": source = NewsSource.FOX; break;
+                                            default: continue;
+                                        }
+                                        
+                                        // Check if this source supports the current category
+                                        if (NewsSources.supports_category(source, current_category)) {
+                                            category_supported = true;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    // No sources enabled, fallback to default source
+                                    category_supported = NewsSources.supports_category(prefs.news_source, current_category);
+                                }
+                                
+                                // If category no longer supported, redirect to frontpage
+                                if (!category_supported) {
+                                    prefs.category = "frontpage";
+                                    prefs.save_config();
+                                }
+                            }
+                            
                             // If personalization or categories changed, update overlay
                             // state first so the UI reflects the new settings quickly,
                             // then re-run the fetch once to refresh articles.
