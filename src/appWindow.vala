@@ -536,10 +536,10 @@ public class NewsWindow : Adw.ApplicationWindow {
         normalized_to_url = new Gee.HashMap<string, string>();
         // Track viewed articles in this session
         viewed_articles = new Gee.HashSet<string>();
-    // Initialize in-memory cache and pending-downloads map
-    // Capacity reduced to 30 (from 50) to prevent memory bloat with multiple sources
-    // With all sources enabled, this prevents caching 200+ images in RAM
-    memory_meta_cache = new LruCache<string, Gdk.Texture>(30);
+        // Initialize in-memory cache and pending-downloads map
+        // Capacity reduced to 30 (from 50) to prevent memory bloat with multiple sources
+        // With all sources enabled, this prevents caching 200+ images in RAM
+        memory_meta_cache = new LruCache<string, Gdk.Texture>(30);
         // Separate thumbnail cache for small images (50 items) - improves hit rate
         thumbnail_cache = new LruCache<string, Gdk.Texture>(50);
         // Eviction callback: log evictions when PAPERBOY_DEBUG is set so we can
@@ -810,6 +810,26 @@ public class NewsWindow : Adw.ApplicationWindow {
     article_preview_split.set_collapsed(true); // Always overlay, never push content
     article_preview_split.set_enable_show_gesture(false); // Disable swipe to prevent accidental opens
     article_preview_split.set_enable_hide_gesture(true);  // Allow swipe to close
+
+    // Defensive: if the OverlaySplitView hides the sidebar via a gesture
+    // or internal handler (e.g. built-in Escape handling), ensure the
+    // dim overlay is also cleared and preview_closed is invoked so the
+    // main view is restored consistently.
+    article_preview_split.notify["show-sidebar"].connect(() => {
+        try {
+            if (!article_preview_split.get_show_sidebar()) {
+                try {
+                    if (last_previewed_url != null && last_previewed_url.length > 0) {
+                        preview_closed(last_previewed_url);
+                    } else {
+                        if (dim_overlay != null) dim_overlay.set_visible(false);
+                    }
+                } catch (GLib.Error e) {
+                    try { if (dim_overlay != null) dim_overlay.set_visible(false); } catch (GLib.Error _e) { }
+                }
+            }
+        } catch (GLib.Error e) { }
+    });
     
     // Create article preview content container
     article_preview_content = new Gtk.Box(Gtk.Orientation.VERTICAL, 0);
@@ -1021,7 +1041,19 @@ public class NewsWindow : Adw.ApplicationWindow {
         key_controller.key_pressed.connect((keyval, keycode, state) => {
             // Escape: close preview
             if (keyval == Gdk.Key.Escape && article_preview_split.get_show_sidebar()) {
+                // Close the preview pane visually first
                 article_preview_split.set_show_sidebar(false);
+                // Log current state for diagnostics when PAPERBOY_DEBUG is set
+                try {
+                    string dbg = "";
+                    try {
+                        dbg = "Escape pressed: show_sidebar=" + (article_preview_split.get_show_sidebar() ? "true" : "false") +
+                              " last_previewed_url=" + (last_previewed_url != null ? last_previewed_url : "<null>") +
+                              " dim_visible=" + (dim_overlay != null && dim_overlay.get_visible() ? "true" : "false");
+                        append_debug_log(dbg);
+                    } catch (GLib.Error e) { }
+                } catch (GLib.Error e) { }
+
                 try {
                     if (last_previewed_url != null && last_previewed_url.length > 0) {
                         preview_closed(last_previewed_url);
@@ -1029,8 +1061,13 @@ public class NewsWindow : Adw.ApplicationWindow {
                         dim_overlay.set_visible(false);
                     }
                 } catch (GLib.Error e) {
-                    dim_overlay.set_visible(false);
+                    // Ensure overlay is hidden even if preview_closed raised an error
+                    try { dim_overlay.set_visible(false); } catch (GLib.Error _e) { }
                 }
+
+                // Defensive: always ensure the dim overlay is hidden after handling Escape.
+                try { if (dim_overlay != null) dim_overlay.set_visible(false); } catch (GLib.Error e) { }
+
                 return true;
             }
 
