@@ -694,21 +694,15 @@ public class NewsWindow : Adw.ApplicationWindow {
         }
         
         if (!category_supported) {
+            // Record a short debug trace when falling back to frontpage
+                // Removed temporary sidebar activation disk logging used during
+                // diagnostics. Keep behavior: fall back to frontpage when the
+                // selected category is unsupported.
             cat = "frontpage";
-            try {
-                string? _dbg_redirect = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-                if (_dbg_redirect != null && _dbg_redirect.length > 0) {
-                    append_debug_log("Redirecting to frontpage: category not supported by any selected source");
-                }
-            } catch (GLib.Error e) { }
         }
         
         prefs.category = cat;
         try { update_category_icon(); } catch (GLib.Error e) { }
-        try {
-            string? _dbg3 = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-            if (_dbg3 != null && _dbg3.length > 0) append_debug_log("activation_set_prefs: prefs.category=" + prefs.category);
-        } catch (GLib.Error e) { }
         prefs.save_config();
         try { update_local_news_ui(); } catch (GLib.Error e) { }
         try {
@@ -716,10 +710,6 @@ public class NewsWindow : Adw.ApplicationWindow {
         } catch (GLib.Error e) { }
         Idle.add(() => {
             try { prefs.category = cat; prefs.save_config(); } catch (GLib.Error e) { }
-            try {
-                string? _dbg2 = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-                if (_dbg2 != null && _dbg2.length > 0) append_debug_log("idle_fetch: scheduled_category=" + prefs.category);
-            } catch (GLib.Error e) { }
             try { fetch_news(); } catch (GLib.Error e) { }
             try { update_personalization_ui(); } catch (GLib.Error e) { }
             return false;
@@ -1043,17 +1033,6 @@ public class NewsWindow : Adw.ApplicationWindow {
             if (keyval == Gdk.Key.Escape && article_preview_split.get_show_sidebar()) {
                 // Close the preview pane visually first
                 article_preview_split.set_show_sidebar(false);
-                // Log current state for diagnostics when PAPERBOY_DEBUG is set
-                try {
-                    string dbg = "";
-                    try {
-                        dbg = "Escape pressed: show_sidebar=" + (article_preview_split.get_show_sidebar() ? "true" : "false") +
-                              " last_previewed_url=" + (last_previewed_url != null ? last_previewed_url : "<null>") +
-                              " dim_visible=" + (dim_overlay != null && dim_overlay.get_visible() ? "true" : "false");
-                        append_debug_log(dbg);
-                    } catch (GLib.Error e) { }
-                } catch (GLib.Error e) { }
-
                 try {
                     if (last_previewed_url != null && last_previewed_url.length > 0) {
                         preview_closed(last_previewed_url);
@@ -1515,6 +1494,7 @@ public class NewsWindow : Adw.ApplicationWindow {
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
+            case "business": return "Business";
             case "markets": return "Markets";
             case "industries": return "Industries";
             case "economics": return "Economics";

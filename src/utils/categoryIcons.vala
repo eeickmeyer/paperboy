@@ -34,6 +34,7 @@ public class CategoryIcons : GLib.Object {
             case "us": filename = "us-mono.svg"; break;
             case "local_news": filename = "local-mono.svg"; break;
             case "technology": filename = "technology-mono.svg"; break;
+            case "business": filename = "business-mono.svg"; break;
             case "science": filename = "science-mono.svg"; break;
             case "sports": filename = "sports-mono.svg"; break;
             case "health": filename = "health-mono.svg"; break;
@@ -102,6 +103,11 @@ public class CategoryIcons : GLib.Object {
             case "technology":
                 candidates = { "computer-symbolic", "applications-engineering-symbolic", "applications-system-symbolic" };
                 break;
+            case "business":
+                // Use the specific business assets if present, otherwise fall back
+                // to money/economics symbolic icons.
+                candidates = { "business-symbolic", "economics-symbolic", "wealth-symbolic", "emblem-money-symbolic" };
+                break;
             case "science":
                 candidates = { "applications-science-symbolic", "utilities-science-symbolic", "view-list-symbolic" };
                 break;
@@ -151,6 +157,7 @@ public class CategoryIcons : GLib.Object {
             case "us": filename = "us-mono.svg"; break;
             case "local_news": filename = "local-mono.svg"; break;
             case "technology": filename = "technology-mono.svg"; break;
+            case "business": filename = "business-mono.svg"; break;
             case "science": filename = "science-mono.svg"; break;
             case "sports": filename = "sports-mono.svg"; break;
             case "health": filename = "health-mono.svg"; break;

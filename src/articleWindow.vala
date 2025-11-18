@@ -56,22 +56,6 @@ public class ArticleWindow : GLib.Object {
         preview_content_box = content_box;
     }
 
-    // Local debug logger: write lightweight traces to /tmp/paperboy-debug.log
-    // This mirrors the debug helper in NewsWindow but is kept private so
-    // the ArticleWindow can emit logs without accessing NewsWindow's private
-    // members.
-    private void append_debug_log(string line) {
-        try {
-            string path = "/tmp/paperboy-debug.log";
-            string old = "";
-            try { GLib.FileUtils.get_contents(path, out old); } catch (GLib.Error e) { old = ""; }
-            string outc = old + line + "\n";
-            GLib.FileUtils.set_contents(path, outc);
-        } catch (GLib.Error e) {
-            // best-effort logging only
-        }
-    }
-
     // Show a modal preview with image and a small snippet
     // `category_id` is optional; when it's "local_news" we prefer the
     // app-local placeholder so previews for Local News items match the
@@ -351,20 +335,7 @@ public class ArticleWindow : GLib.Object {
             }
         }
 
-                // Debug trace the decision so we can inspect runtime behavior when
-                // PAPERBOY_DEBUG is enabled. This helps explain cases where the
-                // preview label is repainted unexpectedly.
-                try {
-            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-            if (_dbg != null && _dbg.length > 0) {
-                try { append_debug_log("show_article_preview: explicit_source=" + (explicit_source_name != null ? explicit_source_name : "(null)") +
-                                 " inferred=" + get_source_name(article_src) +
-                                 " prefs_news_source=" + get_source_name(prefs.news_source) +
-                                 " category=" + (category_id != null ? category_id : "(null)") +
-                                 " host=" + extract_host_from_url(url) +
-                                 " display_source=" + display_source); } catch (GLib.Error ee) { }
-            }
-        } catch (GLib.Error e) { }
+                // Debug traces removed from ArticleWindow
 
                 if (homepage_published_any != null && homepage_published_any.length > 0)
                     meta_label.set_text(display_source + " • " + format_published(homepage_published_any));
@@ -495,7 +466,7 @@ public class ArticleWindow : GLib.Object {
                                     if (new_height < 1) new_height = 1;
                                     // Use BILINEAR here for speed (trade a tiny amount of quality)
                                     pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.BILINEAR);
-                                    try { append_debug_log("article preview: fast downscale to " + new_width.to_string() + "x" + new_height.to_string()); } catch (GLib.Error e) { }
+                                    // Debug trace removed
                                 }
 
                                 // Create a texture directly from the (possibly resized) pixbuf
@@ -1076,10 +1047,7 @@ public class ArticleWindow : GLib.Object {
                 // Local News) with the application's global source name.
                 if (meta_label != null && published.length > 0) {
                     string label_to_use = (display_source != null && display_source.length > 0) ? display_source : get_source_name(source);
-                    try {
-                        string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-                        if (_dbg != null && _dbg.length > 0) append_debug_log("fetch_snippet_async: url=" + url + " published=" + published + " label=" + label_to_use);
-                    } catch (GLib.Error e) { }
+                    // Debug traces removed from fetch_snippet_async
                     meta_label.set_text(label_to_use + " • " + format_published(published));
                 }
                 on_done(final);

@@ -434,31 +434,13 @@ public class NewsSources {
                             category_id = s_raw.down().replace(" ", "_").replace("-", "_").strip();
                         }
 
-                        // Write a concise per-article debug line so we can inspect
-                        // what the backend provided and confirm logos are parsed.
-                        try {
-                            string path = "/tmp/paperboy-debug.log";
-                            string old = "";
-                            try { GLib.FileUtils.get_contents(path, out old); } catch (GLib.Error e) { old = ""; }
-                            string safe_title = title.replace("\n", " ").replace("\"", "'");
-                            string safe_display = display_source != null ? display_source.replace("\n", " ").replace("\"", "'") : "<null>";
-                            string safe_logo = logo_url != null ? logo_url : "<null>";
-                            string safe_url = article_url != null ? article_url : "<null>";
-                            string line = "frontpage-parse: idx=%u title=\"%s\" source=\"%s\" logo=\"%s\" url=\"%s\"".printf(i, safe_title, safe_display, safe_logo, safe_url);
-                            try { GLib.FileUtils.set_contents(path, old + line + "\n"); } catch (GLib.Error e) { }
-                        } catch (GLib.Error e) { }
+                        // Debug trace removed: avoid writing to disk during frontpage parsing.
 
                         if (current_search_query.length > 0) {
                             if (!title.contains(current_search_query) && !article_url.contains(current_search_query)) continue;
                         }
 
-                        // Debug: write parsed frontpage article fields to a temp log file
-                        try {
-                            string old = "";
-                            try { GLib.FileUtils.get_contents("/tmp/paperboy-debug.log", out old); } catch (GLib.Error ee) { old = ""; }
-                            string outc = old + "frontpage_parsed: title='" + title.replace("\n", " ").replace("\r", " ") + "' url='" + article_url + "' display_source='" + (display_source != null ? display_source : "<null>") + "'\n";
-                            try { GLib.FileUtils.set_contents("/tmp/paperboy-debug.log", outc); } catch (GLib.Error ee) { }
-                        } catch (GLib.Error e) { }
+                        // Debug trace removed.
 
                         // Encode the detected category into the display_source so the UI
                         // can show the real category label while we still pass the
@@ -747,6 +729,7 @@ public class NewsSources {
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
+            case "business": return "Business";
             case "markets": return "Markets";
             case "industries": return "Industries";
             case "economics": return "Economics";
@@ -801,6 +784,10 @@ public class NewsSources {
         if (source == NewsSource.BBC || source == NewsSource.REDDIT || source == NewsSource.REUTERS) {
             if (category == "lifestyle") return false;
         }
+
+        // Debug traces removed: this function is performance-sensitive and
+        // should not write to disk in normal runs. Use AppDebugger/append_debug_log
+        // in other callbacks if persistent debugging is required.
 
         if (source == NewsSource.BLOOMBERG) {
             switch (category) {
@@ -859,6 +846,9 @@ public class NewsSources {
             case "technology":
                 path = "Technology.xml";
                 break;
+            case "business":
+                path = "business.xml";
+                break;
             case "science":
                 path = "Science.xml";
                 break;
@@ -897,6 +887,9 @@ public class NewsSources {
         switch (current_category) {
             case "technology":
                 url = "https://feeds.bbci.co.uk/news/technology/rss.xml";
+                break;
+            case "business":
+                url = "https://feeds.bbci.co.uk/news/business/rss.xml";
                 break;
             case "science":
                 url = "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml";
@@ -946,6 +939,9 @@ public class NewsSources {
                     case "technology":
                         url = base_url + "&section=technology";
                         break;
+                    case "business":
+                        url = base_url + "&section=business";
+                        break;
                     case "science":
                         url = base_url + "&section=science";
                         break;
@@ -994,6 +990,8 @@ public class NewsSources {
                     return null;
                 }
                 var results = response.get_array_member("results");
+                // Removed temporary debug write to /tmp/paperboy-debug.log. Prefer
+                // centralized logging via AppDebugger.append_debug_log when needed.
 
                 string category_name = category_display_name(current_category);
                 Idle.add(() => {
@@ -1049,6 +1047,10 @@ public class NewsSources {
                     case "technology":
                         subreddit = "technology";
                         category_name = "Technology";
+                        break;
+                    case "business":
+                        subreddit = "business";
+                        category_name = "Business";
                         break;
                     case "science":
                         subreddit = "science";
@@ -1289,6 +1291,7 @@ public class NewsSources {
                         section_urls.add("https://www.foxnews.com/tech");
                         section_urls.add("https://www.foxnews.com/technology");
                         break;
+                    case "business": section_urls.add("https://www.foxnews.com/business"); break;
                     case "science": section_urls.add("https://www.foxnews.com/science"); break;
                     case "sports": section_urls.add("https://www.foxnews.com/sports"); break;
                     case "health": section_urls.add("https://www.foxnews.com/health"); break;
@@ -1411,6 +1414,9 @@ public class NewsSources {
         switch (current_category) {
             case "technology":
                 url = "https://feeds.content.dowjones.io/public/rss/RSSWSJD";
+                break;
+            case "business":
+                url = "https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness";
                 break;
             case "sports":
                 url = "https://feeds.content.dowjones.io/public/rss/rsssportsfeed";

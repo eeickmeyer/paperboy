@@ -731,10 +731,11 @@ public class PrefsDialog : GLib.Object {
         // Local helper to create the category icon (tries bundled mono icons then theme fallbacks)
         Gtk.Widget? create_category_icon_local(string cat) {
             string? filename = null;
-            switch (cat) {
+                switch (cat) {
                 case "all": filename = "all-mono.svg"; break;
                 case "myfeed": filename = "myfeed-mono.svg"; break;
                 case "general": filename = "world-mono.svg"; break;
+                case "business": filename = "business-mono.svg"; break;
                 case "markets": filename = "markets-mono.svg"; break;
                 case "industries": filename = "industries-mono.svg"; break;
                 case "economics": filename = "economics-mono.svg"; break;
@@ -780,7 +781,7 @@ public class PrefsDialog : GLib.Object {
                             if (white_candidate != null) use_path = white_candidate;
                         }
                         var img = new Gtk.Image.from_file(use_path);
-                        img.set_pixel_size(16);
+                        img.set_pixel_size(24);
                         return img;
                     } catch (GLib.Error e) { }
                 }
@@ -844,8 +845,8 @@ public class PrefsDialog : GLib.Object {
                 }
             } else {
                 // Base (common) categories - keep these visible normally
-                string[] base_ids = { "general", "us", "technology", "science", "sports", "health", "entertainment", "politics", "lifestyle" };
-                string[] base_titles = { "World News", "US News", "Technology", "Science", "Sports", "Health", "Entertainment", "Politics", "Lifestyle" };
+                string[] base_ids = { "general", "us", "technology", "business", "science", "sports", "health", "entertainment", "politics", "lifestyle" };
+                string[] base_titles = { "World News", "US News", "Technology", "Business", "Science", "Sports", "Health", "Entertainment", "Politics", "Lifestyle" };
                 for (int i = 0; i < base_ids.length; i++) {
                     cat_ids_list.add(base_ids[i]);
                     cat_titles_list.add(base_titles[i]);

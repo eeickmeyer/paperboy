@@ -110,7 +110,12 @@ public class NewsPreferences : GLib.Object {
                 // Include "local_news" as a top-level, non-category view so
                 // users can select it even when operating in single-source
                 // mode. Treat it similarly to "myfeed" for persistence checks.
-                string[] def = { "general", "us", "technology", "science", "sports", "health", "entertainment", "politics", "lifestyle", "myfeed", "local_news" };
+                // Include common cross-source categories here so they are
+                // preserved when the app is operating in single-source mode.
+                // 'business' is supported by many sources (Guardian, NYTimes,
+                // Bloomberg, etc.) and must be allowed or we'll coerce the
+                // user back to 'topten' when saving preferences.
+                string[] def = { "general", "us", "technology", "business", "science", "sports", "health", "entertainment", "politics", "lifestyle", "myfeed", "local_news" };
                 foreach (var d in def) if (d == cat) return true;
                 return false;
         }

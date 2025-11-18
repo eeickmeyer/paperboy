@@ -21,13 +21,7 @@ public class SidebarManager : GLib.Object {
 
     // Rebuild the sidebar rows according to the currently selected source
     public void rebuild_rows() {
-        try {
-            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-            if (_dbg != null && _dbg.length > 0) {
-                string pref = AppDebugger.array_join(window.prefs.preferred_sources);
-                window.append_debug_log("rebuild_sidebar: preferred_sources=" + pref + " current_category=" + window.prefs.category);
-            }
-        } catch (GLib.Error e) { }
+        // Debug logging removed - keep sidebar rebuild lean.
 
         // Clear existing rows
         int removed = 0;
@@ -38,10 +32,7 @@ public class SidebarManager : GLib.Object {
             child = next;
             removed++;
         }
-        try {
-            string? _dbg2 = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-            if (_dbg2 != null && _dbg2.length > 0) window.append_debug_log("rebuild_sidebar: removed_rows=" + removed.to_string());
-        } catch (GLib.Error e) { }
+        // debug trace removed
 
         // Place "Front Page" and "My Feed" above the Categories header
             add_row("Top Ten", "topten", window.prefs.category == "topten");
@@ -54,7 +45,7 @@ public class SidebarManager : GLib.Object {
         // categories supported by those sources and show only those rows.
         if (window.prefs.preferred_sources != null && window.prefs.preferred_sources.size > 1) {
             var allowed = new Gee.HashMap<string, bool>();
-            string[] default_cats = { "general", "us", "technology", "science", "sports", "health", "entertainment", "politics", "lifestyle" };
+            string[] default_cats = { "general", "us", "technology", "business", "science", "sports", "health", "entertainment", "politics", "lifestyle" };
             foreach (var c in default_cats) allowed.set(c, true);
             
             // Check if at least one source supports lifestyle
@@ -96,7 +87,7 @@ public class SidebarManager : GLib.Object {
                 }
             }
 
-            string[] priority = { "general", "us", "technology", "science", "markets", "industries", "economics", "wealth", "green", "sports", "health", "entertainment", "politics", "lifestyle" };
+            string[] priority = { "general", "us", "technology", "business", "markets", "industries", "economics", "wealth", "green", "sports", "science", "health", "entertainment", "politics", "lifestyle" };
             foreach (var cat in priority) {
                 bool present = false;
                 foreach (var kv in allowed.entries) {
@@ -121,8 +112,9 @@ public class SidebarManager : GLib.Object {
             add_row("World News", "general", window.prefs.category == "general");
             add_row("US News", "us", window.prefs.category == "us");
             add_row("Technology", "technology", window.prefs.category == "technology");
-            add_row("Science", "science", window.prefs.category == "science");
+            add_row("Business", "business", window.prefs.category == "business");
             add_row("Sports", "sports", window.prefs.category == "sports");
+            add_row("Science", "science", window.prefs.category == "science");
             add_row("Health", "health", window.prefs.category == "health");
             add_row("Entertainment", "entertainment", window.prefs.category == "entertainment");
             add_row("Politics", "politics", window.prefs.category == "politics");
@@ -206,10 +198,7 @@ public class SidebarManager : GLib.Object {
         });
 
         sidebar_list.append(row);
-        try {
-            string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
-            if (_dbg != null && _dbg.length > 0) window.append_debug_log("sidebar_add_row: cat=" + cat + " title=" + title + " selected=" + (selected ? "yes" : "no"));
-        } catch (GLib.Error e) { }
+        // debug trace removed
         if (selected) sidebar_list.select_row(row);
     }
 }
