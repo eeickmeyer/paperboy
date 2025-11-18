@@ -2388,9 +2388,6 @@ public class NewsWindow : Adw.ApplicationWindow {
             // Caller retains image-load logic; register picture for in-place updates
             image_handler.load_image_async(article_card.image, thumbnail_url, img_w * multiplier, img_h * multiplier);
             register_picture_for_url(_norm, article_card.image);
-            normalized_to_url.set(_norm, url);
-            // Register the card mapping so overlays (Viewed badge) can be attached
-            register_card_for_url(_norm, article_card.root);
         } else {
             if (category_id == "local_news") {
                 set_local_placeholder_image(article_card.image, img_w, img_h);
@@ -2399,13 +2396,16 @@ public class NewsWindow : Adw.ApplicationWindow {
             }
         }
 
-    // Map normalized URL -> card widget for overlays/badges and viewed state
-    register_card_for_url(_norm, article_card.root);
+        // Map normalized URL -> original URL and card widget for overlays/badges and viewed state
+        normalized_to_url.set(_norm, url);
+        register_card_for_url(_norm, article_card.root);
         try {
             if (meta_cache != null) {
                 bool was = false;
                 try { was = meta_cache.is_viewed(_norm); } catch (GLib.Error e) { was = false; }
                 try { append_debug_log("meta_check: card url=" + _norm + " was=" + (was ? "true" : "false")); } catch (GLib.Error e) { }
+                // Debug output for viewed state
+                stderr.printf("[VIEWED_CHECK] URL: %s | Viewed: %s\n", _norm, was ? "YES" : "NO");
                 if (was) { try { mark_article_viewed(_norm); } catch (GLib.Error e) { } }
             }
         } catch (GLib.Error e) { }
@@ -2532,10 +2532,25 @@ public class NewsWindow : Adw.ApplicationWindow {
     // Resolve a NewsSource from a provided display/source name if possible;
     // fall back to URL inference when the name is missing or unrecognized.
     private NewsSource resolve_source(string? source_name, string? url) {
+        // Parse encoded source name format: "SourceName||logo_url##category::cat"
+        string? clean_name = source_name;
+        if (source_name != null && source_name.length > 0) {
+            // Strip logo URL if present
+            int pipe_idx = source_name.index_of("||");
+            if (pipe_idx >= 0) {
+                clean_name = source_name.substring(0, pipe_idx).strip();
+            }
+            // Strip category suffix if present
+            int cat_idx = clean_name.index_of("##category::");
+            if (cat_idx >= 0) {
+                clean_name = clean_name.substring(0, cat_idx).strip();
+            }
+        }
+        
         // Start with URL-inferred source as a sensible default
         NewsSource resolved = infer_source_from_url(url);
-        if (source_name != null && source_name.length > 0) {
-            string low = source_name.down();
+        if (clean_name != null && clean_name.length > 0) {
+            string low = clean_name.down();
             if (low.index_of("guardian") >= 0) resolved = NewsSource.GUARDIAN;
             else if (low.index_of("bbc") >= 0) resolved = NewsSource.BBC;
             else if (low.index_of("reddit") >= 0) resolved = NewsSource.REDDIT;
@@ -2553,7 +2568,8 @@ public class NewsWindow : Adw.ApplicationWindow {
             string? _dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
             if (_dbg != null && _dbg.length > 0) {
                 string in_src = source_name != null ? source_name : "<null>";
-                append_debug_log("resolve_source: input_name=" + in_src + " url=" + (url != null ? url : "<null>") + " resolved=" + get_source_name(resolved));
+                string clean_src = clean_name != null ? clean_name : "<null>";
+                append_debug_log("resolve_source: input_name=" + in_src + " clean_name=" + clean_src + " url=" + (url != null ? url : "<null>") + " resolved=" + get_source_name(resolved));
             }
         } catch (GLib.Error e) { }
 
@@ -2585,13 +2601,20 @@ public class NewsWindow : Adw.ApplicationWindow {
     // icon file derived from the source name. If no icon is found it falls
     // back to a text-only badge using the provided name.
     private Gtk.Widget build_source_badge_dynamic(string? source_name, string? url, string? category_id) {
-        // Support encoded API-provided logo information: "Display Name||https://.../logo.png"
+        // Support encoded API-provided logo information: "Display Name||https://.../logo.png##category::cat"
         string? provided_logo_url = null;
         string? display_name = source_name;
         if (source_name != null && source_name.index_of("||") >= 0) {
             string[] parts = source_name.split("||");
             if (parts.length >= 1) display_name = parts[0].strip();
-            if (parts.length >= 2) provided_logo_url = parts[1].strip();
+            if (parts.length >= 2) {
+                provided_logo_url = parts[1].strip();
+                // Strip category suffix if present (format: "logo_url##category::cat")
+                int cat_idx = provided_logo_url.index_of("##category::");
+                if (cat_idx >= 0) {
+                    provided_logo_url = provided_logo_url.substring(0, cat_idx).strip();
+                }
+            }
         }
 
         // Debug: record what the badge builder was handed so we can see
@@ -2606,16 +2629,36 @@ public class NewsWindow : Adw.ApplicationWindow {
         // but only when the API did NOT provide an explicit logo URL. When the
         // API provides a logo URL (encoded with "||") we treat it as the
         // authoritative branding and do NOT map to the bundled built-in icons.
-        // Additionally: when viewing the special 'frontpage' category the
-        // backend's provided source name/logo should be treated as authoritative
+        // Additionally: when viewing the special 'frontpage' or 'topten' categories
+        // the backend's provided source name/logo should be treated as authoritative
         // and we must NOT map it to the user's preferred/built-in sources.
-        bool is_frontpage = (category_id != null && category_id == "frontpage");
-        if (!is_frontpage && provided_logo_url == null && display_name != null && display_name.length > 0) {
+        bool is_aggregated = (category_id != null && (category_id == "frontpage" || category_id == "topten"));
+        if (!is_aggregated && provided_logo_url == null && display_name != null && display_name.length > 0) {
             NewsSource resolved = resolve_source(display_name, url);
             // If resolve_source matched a known built-in source, produce that badge
             // by checking if get_source_icon_path would return a non-null path.
             string? icon_path = get_source_icon_path(resolved);
             if (icon_path != null) return build_source_badge(resolved);
+        }
+        
+        // For aggregated views (frontpage/topten) with explicit source names,
+        // create a text-only badge without trying to resolve to built-in sources
+        if (is_aggregated && display_name != null && display_name.length > 0 && provided_logo_url == null) {
+            var box = new Gtk.Box(Orientation.HORIZONTAL, 6);
+            box.add_css_class("source-badge");
+            box.set_margin_bottom(8);
+            box.set_margin_end(8);
+            box.set_valign(Gtk.Align.END);
+            box.set_halign(Gtk.Align.END);
+
+            var lbl = new Gtk.Label(display_name);
+            lbl.add_css_class("source-badge-label");
+            lbl.set_valign(Gtk.Align.CENTER);
+            lbl.set_xalign(0.5f);
+            lbl.set_ellipsize(Pango.EllipsizeMode.END);
+            lbl.set_max_width_chars(14);
+            box.append(lbl);
+            return box;
         }
 
         // Log parsed badge details for debugging when enabled
@@ -2866,6 +2909,8 @@ public class NewsWindow : Adw.ApplicationWindow {
         viewed_articles.add(n);
 
         try { append_debug_log("mark_article_viewed: normalized=" + n); } catch (GLib.Error e) { }
+        // Debug output for marking viewed
+        stderr.printf("[MARK_VIEWED] URL: %s\n", n);
 
         // Add the badge overlay after a small delay to avoid interfering with scroll restoration
         Timeout.add(50, () => {
@@ -2912,17 +2957,18 @@ public class NewsWindow : Adw.ApplicationWindow {
             return false;
         });
         
-        // Persist viewed state to per-article metadata cache so this is stored
-        // with the cached image/metadata rather than the global config file.
-        try {
-            if (meta_cache != null) {
-                bool already = false;
-                try { already = meta_cache.is_viewed(n); } catch (GLib.Error e) { already = false; }
-                if (!already) {
-                    try { meta_cache.mark_viewed(n); } catch (GLib.Error e) { }
-                }
+        // Persist viewed state to per-article metadata cache
+        if (meta_cache != null) {
+            stderr.printf("[META_CACHE] Saving viewed state for: %s\n", n);
+            try { 
+                meta_cache.mark_viewed(n); 
+                stderr.printf("[META_CACHE] Successfully saved\n");
+            } catch (GLib.Error e) {
+                stderr.printf("[META_CACHE] Error in mark_viewed: %s\n", e.message);
             }
-        } catch (GLib.Error e) { }
+        } else {
+            stderr.printf("[META_CACHE] meta_cache is NULL!\n");
+        }
     }
 
     // Called by ArticleWindow when a preview is opened so the main window
@@ -3486,9 +3532,9 @@ public class NewsWindow : Adw.ApplicationWindow {
         memory_meta_cache.clear();
         thumbnail_cache.clear();
         
-        // Clear disk meta cache
+        // Clear disk image cache but preserve metadata (viewed states, etc)
         if (meta_cache != null) {
-            meta_cache.clear();
+            meta_cache.clear_images();
         }
     }
 

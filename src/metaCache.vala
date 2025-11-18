@@ -64,8 +64,8 @@ public class MetaCache : GLib.Object {
             }
 
             if (total > max_total_bytes) {
-                // Best-effort: clear everything
-                try { clear(); } catch (GLib.Error e) { }
+                // Clear only images, preserve metadata (viewed states)
+                try { clear_images(); } catch (GLib.Error e) { }
             }
         } catch (GLib.Error e) {
             // ignore
@@ -95,38 +95,38 @@ public class MetaCache : GLib.Object {
     pending_meta_checks = new Gee.HashSet<string>();
     meta_check_queue = new Gee.ArrayList<string>();
 
-    // Preload metadata directory using WorkerPool to avoid thread creation overhead
-    var pool = WorkerPool.get_default();
-    pool.submit(() => {
+    // Preload metadata directory synchronously to ensure viewed states are
+    // available immediately when articles are first displayed. This prevents
+    // a race condition where articles load before the background preload completes.
+    try {
+        var meta_dir = File.new_for_path(cache_dir_path);
+        FileEnumerator? en = null;
         try {
-            var meta_dir = File.new_for_path(cache_dir_path);
-            FileEnumerator? en = null;
-            try {
-                en = meta_dir.enumerate_children("standard::name", FileQueryInfoFlags.NONE, null);
-                FileInfo? info;
-                while ((info = en.next_file(null)) != null) {
-                    if (info.get_file_type() != FileType.REGULAR) continue;
-                    string name = info.get_name();
-                    if (!name.has_suffix(".meta")) continue;
-                    string full = Path.build_filename(cache_dir_path, name);
-                    // Use read_meta (which is defensive) to parse and handle corrupted files
-                    var kf = read_meta_from_path(full);
-                    if (kf != null) {
-                        try {
-                            string v = kf.get_string("meta", "viewed");
-                            if (v == "1" || v.down() == "true") {
-                                meta_lock_add_viewed(full);
-                            }
-                        } catch (GLib.Error e) { /* no viewed flag */ }
-                    }
+            en = meta_dir.enumerate_children("standard::name", FileQueryInfoFlags.NONE, null);
+            FileInfo? info;
+            while ((info = en.next_file(null)) != null) {
+                if (info.get_file_type() != FileType.REGULAR) continue;
+                string name = info.get_name();
+                if (!name.has_suffix(".meta")) continue;
+                string full = Path.build_filename(cache_dir_path, name);
+                // Use read_meta (which is defensive) to parse and handle corrupted files
+                var kf = read_meta_from_path(full);
+                if (kf != null) {
+                    try {
+                        string v = kf.get_string("meta", "viewed");
+                        if (v == "1" || v.down() == "true") {
+                            meta_lock_add_viewed(full);
+                            stderr.printf("[PRELOAD] Added viewed path: %s\n", full);
+                        }
+                    } catch (GLib.Error e) { /* no viewed flag */ }
                 }
-            } catch (GLib.Error e) {
-                /* best-effort */
-            } finally {
-                if (en != null) try { en.close(null); } catch (GLib.Error e) { }
             }
-        } catch (GLib.Error e) { }
-    });
+        } catch (GLib.Error e) {
+            /* best-effort */
+        } finally {
+            if (en != null) try { en.close(null); } catch (GLib.Error e) { }
+        }
+    } catch (GLib.Error e) { }
 
     // Start a single persistent background worker that consumes
     // `meta_check_queue` items and performs read_meta() calls. This worker
@@ -456,6 +456,14 @@ public class MetaCache : GLib.Object {
 
     // Mark an article URL as viewed by setting a small flag in its metadata
     public void mark_viewed(string url) {
+        string meta_path = meta_path_for(url);
+        
+        // Check if already marked to avoid unnecessary disk I/O
+        if (meta_lock_has_viewed(meta_path)) {
+            stderr.printf("[SAVE_VIEWED] Already marked, skipping: %s\n", meta_path);
+            return;
+        }
+        
         try {
             var kf = read_meta(url);
             if (kf == null) kf = new KeyFile();
@@ -464,10 +472,11 @@ public class MetaCache : GLib.Object {
             kf.set_string("meta", "viewed", "1");
             kf.set_string("meta", "viewed_at", "%d".printf((int)now_s));
             // Debug: log metadata path we will write to
-            try { warning("MetaCache.mark_viewed: writing meta for %s", meta_path_for(url)); } catch (GLib.Error e) { }
+            try { warning("MetaCache.mark_viewed: writing meta for %s", meta_path); } catch (GLib.Error e) { }
+            stderr.printf("[SAVE_VIEWED] Path: %s | URL: %s\n", meta_path, url);
             write_meta(url, kf);
             // Update in-memory cache immediately so UI checks can see the change
-            try { meta_lock_add_viewed(meta_path_for(url)); } catch (GLib.Error e) { }
+            try { meta_lock_add_viewed(meta_path); } catch (GLib.Error e) { }
         } catch (GLib.Error e) {
             warning("Failed to mark viewed for %s: %s", url, e.message);
         }
@@ -477,10 +486,12 @@ public class MetaCache : GLib.Object {
     public bool is_viewed(string url) {
         string meta = meta_path_for(url);
         try { warning("MetaCache.is_viewed: checking meta path %s", meta); } catch (GLib.Error e) { }
+        bool has_it = meta_lock_has_viewed(meta);
+        stderr.printf("[CHECK_VIEWED] Path: %s | URL: %s | Found: %s\n", meta, url, has_it ? "YES" : "NO");
 
         // Fast path: check our in-memory set that was preloaded (or updated
         // via mark_viewed). This avoids expensive disk IO on the main loop.
-        if (meta_lock_has_viewed(meta)) return true;
+        if (has_it) return true;
 
         // If we don't have it in-memory, schedule a single background check
         // for this meta path (do not perform any disk IO on the main loop).
@@ -564,8 +575,53 @@ public class MetaCache : GLib.Object {
             }
             // Attempt to remove the now-empty images directory
             try { FileUtils.remove(images_dir_path); } catch (GLib.Error e) { }
+            
+            // Also clean up old metadata files (older than 90 days) to prevent
+            // unbounded growth, but preserve recent viewed states
+            try { clean_old_metadata(90); } catch (GLib.Error e) { }
         } catch (GLib.Error e) {
             // Best-effort only; don't propagate
+        }
+    }
+    
+    // Remove metadata files older than the specified number of days.
+    // This prevents unbounded metadata accumulation while preserving
+    // recently viewed article states.
+    private void clean_old_metadata(int days) {
+        long cutoff_time = (long)(GLib.get_real_time() / 1000000) - (days * 24 * 60 * 60);
+        
+        try {
+            var meta_dir = File.new_for_path(cache_dir_path);
+            FileEnumerator? meta_enum = null;
+            try {
+                meta_enum = meta_dir.enumerate_children("standard::name,time::modified", FileQueryInfoFlags.NONE, null);
+                FileInfo? info;
+                while ((info = meta_enum.next_file(null)) != null) {
+                    if (info.get_file_type() != FileType.REGULAR) continue;
+                    string name = info.get_name();
+                    if (!name.has_suffix(".meta")) continue;
+                    
+                    // Check file modification time
+                    var modified_time = info.get_modification_date_time();
+                    if (modified_time != null) {
+                        int64 file_time = modified_time.to_unix();
+                        if (file_time < cutoff_time) {
+                            string full = Path.build_filename(cache_dir_path, name);
+                            try { 
+                                FileUtils.remove(full);
+                                // Remove from in-memory cache too
+                                try { viewed_meta_paths.remove(full); } catch (GLib.Error e) { }
+                            } catch (GLib.Error e) { }
+                        }
+                    }
+                }
+            } catch (GLib.Error e) {
+                // ignore
+            } finally {
+                if (meta_enum != null) try { meta_enum.close(null); } catch (GLib.Error e) { }
+            }
+        } catch (GLib.Error e) {
+            // Best-effort
         }
     }
 
