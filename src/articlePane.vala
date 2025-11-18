@@ -133,10 +133,11 @@ public class ArticlePane : GLib.Object {
 
     // Get source from ArticleItem if available, otherwise infer from URL.
     // This ensures correct branding when multiple sources are enabled.
-    NewsSource article_src = NewsPreferences.get_instance().news_source;
+    NewsSource article_src = NewsSource.REDDIT; // Initialize to a default that will be overridden
     string? article_source_name = null;
     string? article_published = null;
     bool found_article_item = false;
+    bool source_mapped = false;
     foreach (var item in parent_window.article_buffer) {
         if (item.url == url && item is ArticleItem) {
             var ai = (ArticleItem) item;
@@ -148,17 +149,18 @@ public class ArticlePane : GLib.Object {
     }
     if (found_article_item && article_source_name != null && article_source_name.length > 0) {
         // Map source name back to NewsSource enum
-        if (article_source_name == "Reuters" || article_source_name.down().index_of("reuters") >= 0) article_src = NewsSource.REUTERS;
-        else if (article_source_name == "The Guardian" || article_source_name.down().index_of("guardian") >= 0) article_src = NewsSource.GUARDIAN;
-        else if (article_source_name == "BBC News" || article_source_name.down().index_of("bbc") >= 0) article_src = NewsSource.BBC;
-        else if (article_source_name == "NY Times" || article_source_name.down().index_of("nytimes") >= 0) article_src = NewsSource.NEW_YORK_TIMES;
-        else if (article_source_name == "Wall Street Journal" || article_source_name.down().index_of("wsj") >= 0) article_src = NewsSource.WALL_STREET_JOURNAL;
-        else if (article_source_name == "Bloomberg" || article_source_name.down().index_of("bloomberg") >= 0) article_src = NewsSource.BLOOMBERG;
-        else if (article_source_name == "NPR" || article_source_name.down().index_of("npr") >= 0) article_src = NewsSource.NPR;
-        else if (article_source_name == "Fox News" || article_source_name.down().index_of("fox") >= 0) article_src = NewsSource.FOX;
-        else if (article_source_name == "Reddit" || article_source_name.down().index_of("reddit") >= 0) article_src = NewsSource.REDDIT;
-    } else {
-        // Only infer from URL if we didn't find ArticleItem
+        if (article_source_name == "Reuters" || article_source_name.down().index_of("reuters") >= 0) { article_src = NewsSource.REUTERS; source_mapped = true; }
+        else if (article_source_name == "The Guardian" || article_source_name.down().index_of("guardian") >= 0) { article_src = NewsSource.GUARDIAN; source_mapped = true; }
+        else if (article_source_name == "BBC News" || article_source_name.down().index_of("bbc") >= 0) { article_src = NewsSource.BBC; source_mapped = true; }
+        else if (article_source_name == "NY Times" || article_source_name.down().index_of("nytimes") >= 0) { article_src = NewsSource.NEW_YORK_TIMES; source_mapped = true; }
+        else if (article_source_name == "Wall Street Journal" || article_source_name.down().index_of("wsj") >= 0) { article_src = NewsSource.WALL_STREET_JOURNAL; source_mapped = true; }
+        else if (article_source_name == "Bloomberg" || article_source_name.down().index_of("bloomberg") >= 0) { article_src = NewsSource.BLOOMBERG; source_mapped = true; }
+        else if (article_source_name == "NPR" || article_source_name.down().index_of("npr") >= 0) { article_src = NewsSource.NPR; source_mapped = true; }
+        else if (article_source_name == "Fox News" || article_source_name.down().index_of("fox") >= 0) { article_src = NewsSource.FOX; source_mapped = true; }
+        else if (article_source_name == "Reddit" || article_source_name.down().index_of("reddit") >= 0) { article_src = NewsSource.REDDIT; source_mapped = true; }
+    }
+    // If we didn't find ArticleItem OR found it but couldn't map the source name, infer from URL
+    if (!found_article_item || !source_mapped) {
         article_src = infer_source_from_url(url);
     }
 
