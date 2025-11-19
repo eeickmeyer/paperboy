@@ -33,7 +33,7 @@ public enum NewsSource {
 
 public delegate void SetLabelFunc(string text);
 public delegate void ClearItemsFunc();
-public delegate void AddItemFunc(string title, string url, string? thumbnail_url, string category_id);
+public delegate void AddItemFunc(string title, string url, string? thumbnail_url, string category_id, string? source_name);
 
 public class NewsSources {
     // Entry point
@@ -46,6 +46,18 @@ public class NewsSources {
         ClearItemsFunc clear_items,
         AddItemFunc add_item
     ) {
+        // Special handling: if the UI requested the unified "frontpage",
+        // fetch aggregated frontpage articles from our Paperboy backend API.
+        if (current_category == "frontpage") {
+            fetch_paperboy_frontpage(current_search_query, session, set_label, clear_items, add_item);
+            return;
+        }
+        // Special handling: if the UI requested "Top Ten",
+        // fetch top headlines from our Paperboy backend API.
+        if (current_category == "topten") {
+            fetch_paperboy_topten(current_search_query, session, set_label, clear_items, add_item);
+            return;
+        }
         // Handle "all" category by fetching from multiple categories for other sources
         if (current_category == "all") {
             fetch_all_categories(source, current_search_query, session, set_label, clear_items, add_item);
@@ -206,6 +218,444 @@ public class NewsSources {
         }
     }
 
+    // Fetch the unified "frontpage" from the Paperboy backend API.
+    // The backend is expected to return a JSON array of article objects or
+    // an object with an "articles" array. We tolerate a few common field
+    // names when mapping into the UI (title, url/link, thumbnail/image).
+    private static void fetch_paperboy_frontpage(
+        string current_search_query,
+        Soup.Session session,
+        SetLabelFunc set_label,
+        ClearItemsFunc clear_items,
+        AddItemFunc add_item
+    ) {
+        new Thread<void*>("fetch-frontpage-api", () => {
+            try {
+                string base_url = "https://paperboybackend.onrender.com";
+                string url = base_url + "/news/frontpage";
+                var msg = new Soup.Message("GET", url);
+                msg.request_headers.append("User-Agent", "paperboy/0.1");
+                session.send_message(msg);
+                if (msg.status_code != 200) {
+                    warning("Paperboy API HTTP error: %u", msg.status_code);
+                    Idle.add(() => {
+                        set_label("Paperboy: Error loading frontpage");
+                        return false;
+                    });
+                    return null;
+                }
+                string body = (string) msg.response_body.flatten().data;
+
+                var parser = new Json.Parser();
+                parser.load_from_data(body);
+                var root = parser.get_root();
+
+                Json.Array articles = null;
+                if (root.get_node_type() == Json.NodeType.ARRAY) {
+                    articles = root.get_array();
+                } else {
+                    var obj = root.get_object();
+                    if (obj.has_member("articles")) {
+                        articles = obj.get_array_member("articles");
+                    } else if (obj.has_member("data")) {
+                        var data = obj.get_object_member("data");
+                        if (data.has_member("articles"))
+                            articles = data.get_array_member("articles");
+                    }
+                }
+
+                if (articles == null) {
+                    // Unexpected response shape
+                    return null;
+                }
+
+                // Note: do simple substring filtering for search queries (case-sensitive).
+
+                Idle.add(() => {
+                    if (current_search_query.length > 0) {
+                        set_label(@"Search Results: \"$(current_search_query)\" in The Frontpage — Paperboy");
+                    } else {
+                        set_label("The Frontpage — Paperboy");
+                    }
+                    clear_items();
+                    uint len = articles.get_length();
+                    for (uint i = 0; i < len; i++) {
+                        var art = articles.get_element(i).get_object();
+                            string title = json_get_string_safe(art, "title") != null ? json_get_string_safe(art, "title") : (json_get_string_safe(art, "headline") != null ? json_get_string_safe(art, "headline") : "No title");
+                            string article_url = json_get_string_safe(art, "url") != null ? json_get_string_safe(art, "url") : (json_get_string_safe(art, "link") != null ? json_get_string_safe(art, "link") : "");
+                            string? thumbnail = null;
+                            if (json_get_string_safe(art, "thumbnail") != null) thumbnail = json_get_string_safe(art, "thumbnail");
+                            else if (json_get_string_safe(art, "image") != null) thumbnail = json_get_string_safe(art, "image");
+                            else if (json_get_string_safe(art, "image_url") != null) thumbnail = json_get_string_safe(art, "image_url");
+                            // Prefer a nested `source` object when present (many backends
+                            // return provider metadata there). Fall back to the old
+                            // top-level fields for compatibility.
+                            string source_name = "Paperboy API";
+                            string? logo_url = null;
+                            string provider_key = "";
+                            string? provider_url = null;
+                            if (art.has_member("source")) {
+                                var src_node = art.get_member("source");
+                                if (src_node != null && src_node.get_node_type() == Json.NodeType.OBJECT) {
+                                    var src_obj = src_node.get_object();
+                                    // typical fields: name, title, url, logo_url, id
+                                    string? n = json_get_string_safe(src_obj, "name");
+                                    if (n == null) n = json_get_string_safe(src_obj, "title");
+                                    if (n != null) source_name = n;
+                                    // pick a provider key when available (prefer explicit `id`)
+                                    string? sid = json_get_string_safe(src_obj, "id");
+                                    if (sid != null && sid.length > 0) provider_key = sid;
+                                    else if (n != null && n.length > 0) provider_key = n;
+                                    // logo fields on the nested source object
+                                    if (json_get_string_safe(src_obj, "logo_url") != null) logo_url = json_get_string_safe(src_obj, "logo_url");
+                                    else if (json_get_string_safe(src_obj, "logo") != null) logo_url = json_get_string_safe(src_obj, "logo");
+                                    else if (json_get_string_safe(src_obj, "favicon") != null) logo_url = json_get_string_safe(src_obj, "favicon");
+                                    // Capture provider URL when present and use it as a
+                                    // hint for display name if the provider didn't
+                                    // supply an explicit name.
+                                    string? provurl = json_get_string_safe(src_obj, "url");
+                                    if (provurl != null) {
+                                        provider_url = provurl;
+                                        if (source_name == null || source_name.length == 0) {
+                                            string inferred = infer_display_name_from_url(provurl);
+                                            if (inferred.length > 0) source_name = inferred;
+                                        }
+                                    }
+                                } else {
+                                    // `source` exists but is not an object: try as string
+                                    string? s = json_get_string_safe(art, "source");
+                                    if (s != null) source_name = s;
+                                    if (source_name != null) provider_key = source_name;
+                                }
+                            } else {
+                                // legacy/top-level provider fields
+                                if (json_get_string_safe(art, "source") != null) source_name = json_get_string_safe(art, "source");
+                                else if (json_get_string_safe(art, "provider") != null) source_name = json_get_string_safe(art, "provider");
+                                if (source_name != null) provider_key = source_name;
+                            }
+
+                            // If backend returned a generic placeholder (or nothing),
+                            // try to infer a sensible display name from the article URL
+                            if (source_name == null || source_name.length == 0 || source_name == "Paperboy API") {
+                                string inferred = infer_display_name_from_url(article_url);
+                                if (inferred != null && inferred.length > 0) source_name = inferred;
+                            }
+
+                            // Also check for logo fields at the article root if not found
+                            if (logo_url == null) {
+                                if (json_get_string_safe(art, "logo") != null) logo_url = json_get_string_safe(art, "logo");
+                                else if (json_get_string_safe(art, "favicon") != null) logo_url = json_get_string_safe(art, "favicon");
+                                else if (json_get_string_safe(art, "logo_url") != null) logo_url = json_get_string_safe(art, "logo_url");
+                                else if (json_get_string_safe(art, "site_icon") != null) logo_url = json_get_string_safe(art, "site_icon");
+                            }
+
+                        // Normalize common forms returned by various backends:
+                        // - protocol-relative URLs (//example.com/foo.png) -> https://example.com/foo.png
+                        // - trim whitespace
+                        if (logo_url != null) {
+                            logo_url = logo_url.strip();
+                            if (logo_url.has_prefix("//")) {
+                                // Prefer https for protocol-relative assets
+                                logo_url = "https:" + logo_url;
+                            }
+                        }
+
+                        // If we were able to derive a provider key/display-name and
+                        // the backend supplied a logo URL, record it into the
+                        // canonical index and start a background fetch to ensure
+                        // the canonical filename exists under user data.
+                        try {
+                            if (provider_key.length > 0 && logo_url != null && logo_url.length > 0) {
+                                SourceLogos.update_index_and_fetch(provider_key, source_name, logo_url, provider_url, session);
+                            }
+                        } catch (GLib.Error e) { }
+
+                        // If we have a logo URL, encode it into the source_name using
+                        // a small delimiter so the UI can detect and download/cache it.
+                        // Format: "Display Name||<logo_url>". This avoids changing the
+                        // AddItemFunc signature across the codebase.
+                        string display_source = source_name;
+                        if (logo_url != null && logo_url.length > 0) {
+                            display_source = source_name + "||" + logo_url;
+                        }
+
+                        // Extract per-article category/type from the JSON when provided
+                        // so frontpage items can show the real category chip instead of
+                        // a generic "frontpage" label. We try several common field
+                        // names returned by different backends and normalize the
+                        // resulting string into a slug-like id (lowercase, underscores).
+                        string category_id = "frontpage";
+                        string? cat_raw = null;
+                        // Helper to extract a string from a possible VALUE or OBJECT node
+                        // (object may contain id/slug/name fields).
+                        string? extract_from_node(Json.Node? node) {
+                            if (node == null) return null;
+                            try {
+                                if (node.get_node_type() == Json.NodeType.VALUE) {
+                                    try { return node.get_string(); } catch (GLib.Error e) { return null; }
+                                } else if (node.get_node_type() == Json.NodeType.OBJECT) {
+                                    var o = node.get_object();
+                                    // Try common fields in order of preference
+                                    string? v = json_get_string_safe(o, "id");
+                                    if (v != null) return v;
+                                    v = json_get_string_safe(o, "slug");
+                                    if (v != null) return v;
+                                    v = json_get_string_safe(o, "name");
+                                    if (v != null) return v;
+                                    // some providers use 'title'
+                                    v = json_get_string_safe(o, "title");
+                                    if (v != null) return v;
+                                }
+                            } catch (GLib.Error e) { }
+                            return null;
+                        }
+
+                        // Try common simple members first
+                        if (art.has_member("category")) cat_raw = extract_from_node(art.get_member("category"));
+                        if (cat_raw == null && art.has_member("section")) cat_raw = extract_from_node(art.get_member("section"));
+                        if (cat_raw == null && art.has_member("type")) cat_raw = extract_from_node(art.get_member("type"));
+                        if (cat_raw == null && art.has_member("category_id")) cat_raw = extract_from_node(art.get_member("category_id"));
+
+                        // If there's a tags array, inspect its first element (may be VALUE or OBJECT)
+                        if (cat_raw == null && art.has_member("tags")) {
+                            var tags_node = art.get_member("tags");
+                            if (tags_node != null && tags_node.get_node_type() == Json.NodeType.ARRAY) {
+                                var tags_arr = tags_node.get_array();
+                                if (tags_arr.get_length() > 0) {
+                                    var first = tags_arr.get_element(0);
+                                    cat_raw = extract_from_node(first);
+                                }
+                            }
+                        }
+
+                        if (cat_raw != null && cat_raw.length > 0) {
+                            // Normalize to a simple slug: lowercase, spaces/dashes -> underscore
+                            string s_raw = (string) cat_raw;
+                            category_id = s_raw.down().replace(" ", "_").replace("-", "_").strip();
+                        }
+
+                        // Debug trace removed: avoid writing to disk during frontpage parsing.
+
+                        if (current_search_query.length > 0) {
+                            if (!title.contains(current_search_query) && !article_url.contains(current_search_query)) continue;
+                        }
+
+                        // Debug trace removed.
+
+                        // Encode the detected category into the display_source so the UI
+                        // can show the real category label while we still pass the
+                        // special "frontpage" view token to `add_item` (keeps
+                        // filtering/placement logic unchanged).
+                        if (display_source == null) display_source = "";
+                        display_source = display_source + "##category::" + category_id;
+
+                        add_item(title, article_url, thumbnail, "frontpage", display_source);
+                    }
+                    return false;
+                });
+            } catch (GLib.Error e) { warning("Paperboy frontpage fetch error: %s", e.message); }
+            return null;
+        });
+    }
+
+    // Fetch the "Top Ten" headlines from the Paperboy backend API.
+    // Same structure as frontpage but from /news/headlines endpoint.
+    private static void fetch_paperboy_topten(
+        string current_search_query,
+        Soup.Session session,
+        SetLabelFunc set_label,
+        ClearItemsFunc clear_items,
+        AddItemFunc add_item
+    ) {
+        new Thread<void*>("fetch-topten-api", () => {
+            try {
+                string base_url = "https://paperboybackend.onrender.com";
+                string url = base_url + "/news/headlines";
+                var msg = new Soup.Message("GET", url);
+                msg.request_headers.append("User-Agent", "paperboy/0.1");
+                session.send_message(msg);
+                if (msg.status_code != 200) {
+                    warning("Paperboy API HTTP error: %u", msg.status_code);
+                    Idle.add(() => {
+                        set_label("Paperboy: Error loading Top Ten");
+                        return false;
+                    });
+                    return null;
+                }
+                string body = (string) msg.response_body.flatten().data;
+
+                var parser = new Json.Parser();
+                parser.load_from_data(body);
+                var root = parser.get_root();
+
+                Json.Array articles = null;
+                if (root.get_node_type() == Json.NodeType.ARRAY) {
+                    articles = root.get_array();
+                } else {
+                    var obj = root.get_object();
+                    if (obj.has_member("articles")) {
+                        articles = obj.get_array_member("articles");
+                    } else if (obj.has_member("data")) {
+                        var data = obj.get_object_member("data");
+                        if (data.has_member("articles"))
+                            articles = data.get_array_member("articles");
+                    }
+                }
+
+                if (articles == null) {
+                    return null;
+                }
+
+                Idle.add(() => {
+                    set_label("Top Ten — Paperboy");
+                    clear_items();
+                    uint len = articles.get_length();
+                    
+                    // Track seen URLs to skip duplicates (backend sometimes sends duplicate articles)
+                    var seen_urls = new Gee.HashSet<string>();
+                    int added_count = 0;
+                    
+                    for (uint i = 0; i < len && added_count < 10; i++) {
+                        var art = articles.get_element(i).get_object();
+                        string title = json_get_string_safe(art, "title") != null ? json_get_string_safe(art, "title") : (json_get_string_safe(art, "headline") != null ? json_get_string_safe(art, "headline") : "No title");
+                        string article_url = json_get_string_safe(art, "url") != null ? json_get_string_safe(art, "url") : (json_get_string_safe(art, "link") != null ? json_get_string_safe(art, "link") : "");
+                        string? thumbnail = null;
+                        if (json_get_string_safe(art, "thumbnail") != null) thumbnail = json_get_string_safe(art, "thumbnail");
+                        else if (json_get_string_safe(art, "image") != null) thumbnail = json_get_string_safe(art, "image");
+                        else if (json_get_string_safe(art, "image_url") != null) thumbnail = json_get_string_safe(art, "image_url");
+                        
+                        string source_name = "Paperboy API";
+                        string? logo_url = null;
+                        string provider_key = "";
+                        string? provider_url = null;
+                        
+                        if (art.has_member("source")) {
+                            var src_node = art.get_member("source");
+                            if (src_node != null && src_node.get_node_type() == Json.NodeType.OBJECT) {
+                                var src_obj = src_node.get_object();
+                                string? n = json_get_string_safe(src_obj, "name");
+                                if (n == null) n = json_get_string_safe(src_obj, "title");
+                                if (n != null) source_name = n;
+                                string? sid = json_get_string_safe(src_obj, "id");
+                                if (sid != null && sid.length > 0) provider_key = sid;
+                                else if (n != null && n.length > 0) provider_key = n;
+                                
+                                if (json_get_string_safe(src_obj, "logo_url") != null) logo_url = json_get_string_safe(src_obj, "logo_url");
+                                else if (json_get_string_safe(src_obj, "logo") != null) logo_url = json_get_string_safe(src_obj, "logo");
+                                else if (json_get_string_safe(src_obj, "favicon") != null) logo_url = json_get_string_safe(src_obj, "favicon");
+                                
+                                string? provurl = json_get_string_safe(src_obj, "url");
+                                if (provurl != null) {
+                                    provider_url = provurl;
+                                    if (source_name == null || source_name.length == 0) {
+                                        string inferred = infer_display_name_from_url(provurl);
+                                        if (inferred.length > 0) source_name = inferred;
+                                    }
+                                }
+                            } else {
+                                string? s = json_get_string_safe(art, "source");
+                                if (s != null) source_name = s;
+                                if (source_name != null) provider_key = source_name;
+                            }
+                        } else {
+                            if (json_get_string_safe(art, "source") != null) source_name = json_get_string_safe(art, "source");
+                            else if (json_get_string_safe(art, "provider") != null) source_name = json_get_string_safe(art, "provider");
+                            if (source_name != null) provider_key = source_name;
+                        }
+
+                        if (source_name == null || source_name.length == 0 || source_name == "Paperboy API") {
+                            string inferred = infer_display_name_from_url(article_url);
+                            if (inferred != null && inferred.length > 0) source_name = inferred;
+                        }
+
+                        if (logo_url == null) {
+                            if (json_get_string_safe(art, "logo") != null) logo_url = json_get_string_safe(art, "logo");
+                            else if (json_get_string_safe(art, "favicon") != null) logo_url = json_get_string_safe(art, "favicon");
+                            else if (json_get_string_safe(art, "logo_url") != null) logo_url = json_get_string_safe(art, "logo_url");
+                            else if (json_get_string_safe(art, "site_icon") != null) logo_url = json_get_string_safe(art, "site_icon");
+                        }
+
+                        if (logo_url != null) {
+                            logo_url = logo_url.strip();
+                            if (logo_url.has_prefix("//")) {
+                                logo_url = "https:" + logo_url;
+                            }
+                        }
+
+                        try {
+                            if (provider_key.length > 0 && logo_url != null && logo_url.length > 0) {
+                                SourceLogos.update_index_and_fetch(provider_key, source_name, logo_url, provider_url, session);
+                            }
+                        } catch (GLib.Error e) { }
+
+                        string display_source = source_name;
+                        if (logo_url != null && logo_url.length > 0) {
+                            display_source = source_name + "||" + logo_url;
+                        }
+
+                        string category_id = "topten";
+                        string? cat_raw = null;
+                        
+                        string? extract_from_node(Json.Node? node) {
+                            if (node == null) return null;
+                            try {
+                                if (node.get_node_type() == Json.NodeType.VALUE) {
+                                    try { return node.get_string(); } catch (GLib.Error e) { return null; }
+                                } else if (node.get_node_type() == Json.NodeType.OBJECT) {
+                                    var o = node.get_object();
+                                    string? v = json_get_string_safe(o, "id");
+                                    if (v != null) return v;
+                                    v = json_get_string_safe(o, "slug");
+                                    if (v != null) return v;
+                                    v = json_get_string_safe(o, "name");
+                                    if (v != null) return v;
+                                    v = json_get_string_safe(o, "title");
+                                    if (v != null) return v;
+                                }
+                            } catch (GLib.Error e) { }
+                            return null;
+                        }
+
+                        if (art.has_member("category")) cat_raw = extract_from_node(art.get_member("category"));
+                        if (cat_raw == null && art.has_member("section")) cat_raw = extract_from_node(art.get_member("section"));
+                        if (cat_raw == null && art.has_member("type")) cat_raw = extract_from_node(art.get_member("type"));
+                        if (cat_raw == null && art.has_member("category_id")) cat_raw = extract_from_node(art.get_member("category_id"));
+
+                        if (cat_raw == null && art.has_member("tags")) {
+                            var tags_node = art.get_member("tags");
+                            if (tags_node != null && tags_node.get_node_type() == Json.NodeType.ARRAY) {
+                                var tags_arr = tags_node.get_array();
+                                if (tags_arr.get_length() > 0) {
+                                    var first = tags_arr.get_element(0);
+                                    cat_raw = extract_from_node(first);
+                                }
+                            }
+                        }
+
+                        if (cat_raw != null && cat_raw.length > 0) {
+                            string s_raw = (string) cat_raw;
+                            category_id = s_raw.down().replace(" ", "_").replace("-", "_").strip();
+                        }
+
+                        if (display_source == null) display_source = "";
+                        display_source = display_source + "##category::" + category_id;
+
+                        // Skip duplicates based on URL
+                        if (seen_urls.contains(article_url)) {
+                            continue;
+                        }
+                        seen_urls.add(article_url);
+                        
+                        add_item(title, article_url, thumbnail, "topten", display_source);
+                        added_count++;
+                    }
+                    return false;
+                });
+            } catch (GLib.Error e) { warning("Paperboy Top Ten fetch error: %s", e.message); }
+            return null;
+        });
+    }
+
     // Helpers
     // Utility to strip HTML tags from a string (moved here to live with other helpers)
     private static string strip_html(string input) {
@@ -213,12 +663,73 @@ public class NewsSources {
         var regex = new Regex("<[^>]+>", RegexCompileFlags.DEFAULT);
         return regex.replace(input, -1, 0, "");
     }
+
+    // Safe JSON string accessor: returns null when the member is missing,
+    // not a JSON value node, or when the node cannot be converted to a string.
+    // Avoids using Json.Value/GLib.Value helpers which vary across vapi
+    // versions; instead rely on Json.Node API and a guarded call to get_string().
+    private static string? json_get_string_safe(Json.Object obj, string member) {
+        try {
+            if (!obj.has_member(member)) return null;
+            var node = obj.get_member(member);
+            if (node == null) return null;
+            if (node.get_node_type() != Json.NodeType.VALUE) return null;
+            // Json.Node.get_string() will throw if the value isn't a string,
+            // so guard it with try/catch and return null on error.
+            try {
+                return node.get_string();
+            } catch (GLib.Error e) {
+                return null;
+            }
+        } catch (GLib.Error e) {
+            return null;
+        }
+    }
+    // Infer a friendly display name from an article URL when the backend
+    // does not provide a meaningful provider name. This uses the host
+    // portion of the URL (stripping www and ports) and turns label parts
+    // into Title Case (e.g. "nytimes" -> "Nytimes", "the-guardian" -> "The Guardian").
+    private static string infer_display_name_from_url(string? url) {
+        if (url == null) return "Paperboy";
+        string u = url.strip();
+        if (u.length == 0) return "Paperboy";
+        // Remove scheme if present
+        int pos = u.index_of("://");
+    if (pos >= 0) u = u.substring(pos + 3);
+        // Remove path
+    int slash = u.index_of("/");
+    if (slash >= 0) u = u.substring(0, slash);
+        // Remove port
+    int colon = u.index_of(":");
+    if (colon >= 0) u = u.substring(0, colon);
+        // Strip common www prefix
+    if (u.has_prefix("www.")) u = u.substring(4);
+        if (u.length == 0) return "Paperboy";
+    string[] parts = u.split(".");
+        string label = parts.length > 0 ? parts[0] : u;
+        label = label.replace("-", " ").replace("_", " ");
+        string[] words = label.split(" ");
+        string out = "";
+        for (int i = 0; i < words.length; i++) {
+            string w = words[i].strip();
+            if (w.length == 0) continue;
+            // Upper-case the first character (ASCII only) and keep the rest as-is
+            string head = w.substring(0, 1);
+            string tail = w.length > 1 ? w.substring(1) : "";
+            if (out.length > 0) out += " ";
+            out += head + tail;
+        }
+        if (out.length == 0) out = u;
+        return out;
+    }
     private static string category_display_name(string cat) {
         switch (cat) {
-            case "all": return "All Categories";
+            case "frontpage": return "The Frontpage";
+            case "myfeed": return "My Feed";
             case "general": return "World News";
             case "us": return "US News";
             case "technology": return "Technology";
+            case "business": return "Business";
             case "markets": return "Markets";
             case "industries": return "Industries";
             case "economics": return "Economics";
@@ -257,6 +768,38 @@ public class NewsSources {
             default:
                 return "News";
         }
+    }
+
+    // Return whether a given NewsSource can provide articles for the
+    // requested category. This is used by the UI when multiple sources are
+    // selected: if a category (e.g. "markets") is chosen that some sources
+    // don't support (Bloomberg-specific sections), we exclude those sources
+    // from the multi-source fetch so only compatible sources are queried.
+    public static bool supports_category(NewsSource source, string category) {
+        // Only Bloomberg needs special handling: it exposes a narrower set
+        // of dedicated sections. All other sources can be considered to
+        // support the common categories (and many use site-search fallbacks).
+        // BBC, Reddit, and Reuters do not provide dedicated "lifestyle" content;
+        // hide that category for these sources so the UI won't show it.
+        if (source == NewsSource.BBC || source == NewsSource.REDDIT || source == NewsSource.REUTERS) {
+            if (category == "lifestyle") return false;
+        }
+
+        if (source == NewsSource.BLOOMBERG) {
+            switch (category) {
+                case "markets":
+                case "industries":
+                case "economics":
+                case "wealth":
+                case "green":
+                case "politics":
+                case "technology":
+                    return true;
+                default:
+                    return false;
+            }
+        }
+        return true;
     }
 
 
@@ -299,6 +842,9 @@ public class NewsSources {
             case "technology":
                 path = "Technology.xml";
                 break;
+            case "business":
+                path = "business.xml";
+                break;
             case "science":
                 path = "Science.xml";
                 break;
@@ -333,14 +879,13 @@ public class NewsSources {
         ClearItemsFunc clear_items,
         AddItemFunc add_item
     ) {
-        if (current_search_query.length > 0) {
-            fetch_google_domain(current_category, current_search_query, session, set_label, clear_items, add_item, "bbc.co.uk", "BBC News");
-            return;
-        }
         string url = "https://feeds.bbci.co.uk/news/world/rss.xml";
         switch (current_category) {
             case "technology":
                 url = "https://feeds.bbci.co.uk/news/technology/rss.xml";
+                break;
+            case "business":
+                url = "https://feeds.bbci.co.uk/news/business/rss.xml";
                 break;
             case "science":
                 url = "https://feeds.bbci.co.uk/news/science_and_environment/rss.xml";
@@ -360,10 +905,9 @@ public class NewsSources {
             case "entertainment":
                 url = "https://feeds.bbci.co.uk/news/entertainment_and_arts/rss.xml";
                 break;
-            case "lifestyle":
-                // No clear lifestyle feed; use site search to approximate
-                fetch_google_domain(current_category, current_search_query, session, set_label, clear_items, add_item, "bbc.co.uk", "BBC News");
-                return;
+            // Note: BBC does not have a dedicated "lifestyle" RSS feed. The
+            // UI will not show "lifestyle" for BBC (see supports_category),
+            // so we avoid attempting a site-search fallback here.
             default:
                 url = "https://feeds.bbci.co.uk/news/world/rss.xml";
                 break;
@@ -390,6 +934,9 @@ public class NewsSources {
                         break;
                     case "technology":
                         url = base_url + "&section=technology";
+                        break;
+                    case "business":
+                        url = base_url + "&section=business";
                         break;
                     case "science":
                         url = base_url + "&section=science";
@@ -447,7 +994,6 @@ public class NewsSources {
                     } else {
                         set_label(@"$(category_name) — The Guardian");
                     }
-                    clear_items();
                     uint len = results.get_length();
                     for (uint i = 0; i < len; i++) {
                         var article = results.get_element(i).get_object();
@@ -460,7 +1006,7 @@ public class NewsSources {
                                 thumbnail = fields.get_string_member("thumbnail");
                             }
                         }
-                        add_item(title, article_url, thumbnail, current_category);
+                        add_item(title, article_url, thumbnail, current_category, "The Guardian");
                     }
                     // Attempt to fetch higher-quality images (OG images) for Guardian articles
                     fetch_guardian_article_images(results, session, add_item, current_category);
@@ -495,6 +1041,10 @@ public class NewsSources {
                     case "technology":
                         subreddit = "technology";
                         category_name = "Technology";
+                        break;
+                    case "business":
+                        subreddit = "business";
+                        category_name = "Business";
                         break;
                     case "science":
                         subreddit = "science";
@@ -557,7 +1107,6 @@ public class NewsSources {
                     } else {
                         set_label(category_name);
                     }
-                    clear_items();
                     uint len = children.get_length();
                     for (uint i = 0; i < len; i++) {
                         var post = children.get_element(i).get_object();
@@ -593,7 +1142,7 @@ public class NewsSources {
                             }
                         }
                         
-                        add_item(title, post_url, thumbnail, current_category);
+                        add_item(title, post_url, thumbnail, current_category, "Reddit");
                     }
                     return false;
                 });
@@ -736,6 +1285,7 @@ public class NewsSources {
                         section_urls.add("https://www.foxnews.com/tech");
                         section_urls.add("https://www.foxnews.com/technology");
                         break;
+                    case "business": section_urls.add("https://www.foxnews.com/business"); break;
                     case "science": section_urls.add("https://www.foxnews.com/science"); break;
                     case "sports": section_urls.add("https://www.foxnews.com/sports"); break;
                     case "health": section_urls.add("https://www.foxnews.com/health"); break;
@@ -751,7 +1301,6 @@ public class NewsSources {
                 if (current_search_query.length > 0) {
                     Idle.add(() => {
                         set_label(@"No Fox News results for search: \"$(current_search_query)\"");
-                        clear_items();
                         return false;
                     });
                     return null;
@@ -766,7 +1315,6 @@ public class NewsSources {
                     } else {
                         set_label(category_name);
                     }
-                    clear_items();
                     int ui_limit = 16;
                     int ui_count = 0;
                     int total = articles.size;
@@ -774,7 +1322,7 @@ public class NewsSources {
                     foreach (var article in articles) {
                         if (count >= ui_limit) break;
                         Idle.add(() => {
-                            add_item(article.title, article.url, article.image_url, current_category);
+                            add_item(article.title, article.url, article.image_url, current_category, "Fox News");
                             return false;
                         });
                         count++;
@@ -784,11 +1332,10 @@ public class NewsSources {
                 });
             } catch (GLib.Error e) {
                 warning("Error parsing Fox News HTML: %s", e.message);
-                Idle.add(() => {
-                    set_label("Fox News: Error loading articles");
-                    clear_items();
-                    return false;
-                });
+                    Idle.add(() => {
+                        set_label("Fox News: Error loading articles");
+                        return false;
+                    });
             }
             return null;
         });
@@ -814,7 +1361,7 @@ public class NewsSources {
         int count = 0;
         foreach (var article in articles) {
             if (article.image_url == null && count < 6 && article.url != null) {
-                Tools.ImageParser.fetch_open_graph_image(article.url, session, add_item, current_category);
+                Tools.ImageParser.fetch_open_graph_image(article.url, session, add_item, current_category, "Fox News");
                 count++;
             }
             if (count >= 6) break;
@@ -838,7 +1385,7 @@ public class NewsSources {
             if (article.has_member("webUrl")) {
                 string url = article.get_string_member("webUrl");
                 // Delegate OG image fetching to Tools.ImageParser
-                Tools.ImageParser.fetch_open_graph_image(url, session, add_item, current_category);
+                Tools.ImageParser.fetch_open_graph_image(url, session, add_item, current_category, "The Guardian");
                 count++;
             }
         }
@@ -861,6 +1408,9 @@ public class NewsSources {
         switch (current_category) {
             case "technology":
                 url = "https://feeds.content.dowjones.io/public/rss/RSSWSJD";
+                break;
+            case "business":
+                url = "https://feeds.content.dowjones.io/public/rss/WSJcomUSBusiness";
                 break;
             case "sports":
                 url = "https://feeds.content.dowjones.io/public/rss/rsssportsfeed";
@@ -886,6 +1436,4 @@ public class NewsSources {
         }
         RssParser.fetch_rss_url(url, "WSJ", category_display_name(current_category), current_category, current_search_query, session, set_label, clear_items, add_item);
     }
-
-
 }

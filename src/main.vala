@@ -31,6 +31,20 @@ public class PaperboyApp : Adw.Application {
     protected override void activate() {
         var win = new NewsWindow(this);
         win.present();
+        // Eagerly instantiate ZipLookup so it starts loading the CSV in
+        // the background during app startup. This helps ensure the ZIP
+        // database is ready by the time the user opens the Set Location
+        // dialog.
+        try { ZipLookup.get_instance(); } catch (GLib.Error e) { }
+        // If this is the user's first time running the app, show the
+        // source-selection dialog so they can adjust sources immediately.
+        try {
+            var prefs = NewsPreferences.get_instance();
+            // On first run, show the full sources list dialog (with toggles)
+            // instead of the brief 'News Source' alert so users can immediately
+            // enable/disable individual providers.
+            if (prefs.first_run) PrefsDialog.show_sources_list_dialog(win);
+        } catch (GLib.Error e) { }
         
         var change_source_action = new SimpleAction("change-source", null);
         change_source_action.activate.connect(() => {
@@ -43,6 +57,12 @@ public class PaperboyApp : Adw.Application {
             PrefsDialog.show_about_dialog(win);
         });
         this.add_action(about_action);
+
+        var set_location_action = new SimpleAction("set-location", null);
+        set_location_action.activate.connect(() => {
+            PrefsDialog.show_set_location_dialog(win);
+        });
+        this.add_action(set_location_action);
     }
 
 }

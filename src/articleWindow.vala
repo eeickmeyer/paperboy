@@ -26,6 +26,17 @@ public class ArticleWindow : GLib.Object {
     private Gtk.Button back_btn;
     private Soup.Session session;
     private NewsWindow parent_window;
+    // Preview overlay components
+    private Adw.OverlaySplitView? preview_split;
+    private Gtk.Box? preview_content_box;
+    // In-memory cache for article preview textures (url@WxH -> Gdk.Texture).
+    // Kept local to ArticleWindow to avoid touching NewsWindow's private cache.
+    private static Gee.HashMap<string, Gdk.Texture>? preview_cache = null;
+    // Track a per-preview handler so we can attach a one-shot click
+    // listener to the shared header back button and disconnect it when
+    // the preview is closed. This avoids leaving stale handlers that
+    // would incorrectly mark unrelated previews as viewed.
+    private ulong back_btn_handler_id = 0;
 
     // Callback type for snippet results
     private delegate void SnippetCallback(string text);
@@ -35,24 +46,50 @@ public class ArticleWindow : GLib.Object {
         back_btn = back_button;
         session = soup_session;
         parent_window = window;
+        // Initialize preview cache on first construction
+        if (preview_cache == null) preview_cache = new Gee.HashMap<string, Gdk.Texture>();
+    }
+    
+    // Set the preview overlay components (called after ArticleWindow construction)
+    public void set_preview_overlay(Adw.OverlaySplitView split, Gtk.Box content_box) {
+        preview_split = split;
+        preview_content_box = content_box;
     }
 
     // Show a modal preview with image and a small snippet
-    public void show_article_preview(string title, string url, string? thumbnail_url) {
-        // Build a scrolling preview page with a max height constraint
+    // `category_id` is optional; when it's "local_news" we prefer the
+    // app-local placeholder so previews for Local News items match the
+    // card/hero placeholders used in the main UI.
+    public void show_article_preview(string title, string url, string? thumbnail_url, string? category_id = null) {
+        // Notify parent window that a preview is opening so it can track
+        // the active preview (used to mark viewed on return).
+        try { parent_window.preview_opened(url); } catch (GLib.Error e) { }
+        
+        // Clear previous preview content
+        if (preview_content_box != null) {
+            Gtk.Widget? child = preview_content_box.get_first_child();
+            while (child != null) {
+                Gtk.Widget? next = child.get_next_sibling();
+                preview_content_box.remove(child);
+                child = next;
+            }
+        }
+        
+        // Build a scrolling preview page
         var outer = new Gtk.Box(Orientation.VERTICAL, 0);
 
-        // Set a maximum height for the preview content (e.g., 700px)
-        const int MAX_PREVIEW_HEIGHT = 700;
-        outer.set_vexpand(false);
+        outer.set_vexpand(true);
         outer.set_hexpand(true);
-        outer.set_size_request(-1, MAX_PREVIEW_HEIGHT);
 
-        // Title label
+    // Infer source for this article so previews show correct branding when
+    // multiple preferred sources are enabled.
+    NewsSource article_src = infer_source_from_url(url);
+
+        // Title label - AT THE TOP
         var title_wrap = new Gtk.Box(Orientation.VERTICAL, 8);
-        title_wrap.set_margin_start(16);
-        title_wrap.set_margin_end(16);
-        title_wrap.set_margin_top(16);
+        title_wrap.set_margin_start(24);
+        title_wrap.set_margin_end(24);
+        title_wrap.set_margin_top(24);
         title_wrap.set_halign(Gtk.Align.FILL);
         title_wrap.set_hexpand(true);
         // Decode any HTML entities that may be present in scraped titles
@@ -62,11 +99,12 @@ public class ArticleWindow : GLib.Object {
         ttl.set_wrap(true);
         ttl.set_wrap_mode(Pango.WrapMode.WORD_CHAR);
         ttl.set_lines(4);
-        ttl.set_selectable(true);
+        ttl.set_selectable(true);  // Keep selectable for copying
+        ttl.set_can_focus(false);  // Prevent cursor from appearing
         ttl.set_justify(Gtk.Justification.LEFT);
         title_wrap.append(ttl);
 
-        // Metadata label (source + published date/time)
+        // Metadata label (source + published date/time) - AFTER TITLE
         var meta_label = new Gtk.Label("");
         meta_label.set_xalign(0);
         meta_label.set_selectable(false);
@@ -77,38 +115,84 @@ public class ArticleWindow : GLib.Object {
         title_wrap.append(meta_label);
         outer.append(title_wrap);
 
-        // Image (constrained)
-        int img_w = estimate_content_width();
+    // Image (constrained) - AFTER METADATA
+        int img_w = 600; // Fixed width for side panel
         int img_h = clampi((int)(img_w * 9.0 / 16.0), 240, 420);
         var pic_box = new Gtk.Box(Orientation.VERTICAL, 0);
         pic_box.set_vexpand(false);
         pic_box.set_hexpand(true);
         pic_box.set_size_request(-1, img_h);
+        pic_box.set_margin_start(24);
+        pic_box.set_margin_end(24);
+        pic_box.set_margin_top(16);
+        pic_box.set_margin_bottom(0);
+        
         var pic = new Gtk.Picture();
         pic.set_halign(Gtk.Align.FILL);
         pic.set_hexpand(true);
         pic.set_size_request(-1, img_h);
         pic.set_content_fit(Gtk.ContentFit.COVER);
         pic.set_can_shrink(true);
-        pic.set_margin_start(16);
-        pic.set_margin_end(16);
-        pic.set_margin_top(8);
-        pic.set_margin_bottom(8);
-        set_placeholder_image(pic, img_w, img_h);
-        if (thumbnail_url != null && thumbnail_url.length > 0 && (thumbnail_url.has_prefix("http://") || thumbnail_url.has_prefix("https://"))) {
-            var prefs = NewsPreferences.get_instance();
-            int multiplier = (prefs.news_source == NewsSource.REDDIT) ? 2 : 3;
+        
+        // Add rounded corners to the image
+        pic.add_css_class("card");
+        pic.set_overflow(Gtk.Overflow.HIDDEN);
+        // If a thumbnail URL will be requested, skip painting any branded
+        // placeholder now to avoid briefly showing a logo before the real
+        // image loads. The async loader will paint a placeholder on failure
+        // or when it decides a placeholder is preferable (e.g., very large
+        // images). If no thumbnail URL is available, paint the usual
+        // source/local placeholder immediately.
+        bool will_load_image = thumbnail_url != null && thumbnail_url.length > 0 && (thumbnail_url.has_prefix("http://") || thumbnail_url.has_prefix("https://"));
+        if (!will_load_image) {
+            // Use the Local News placeholder when the article belongs to the
+            // Local News category so previews match the feed cards. Otherwise
+            // fall back to the source-specific placeholder.
+            if (category_id != null && category_id == "local_news") {
+                try {
+                    // Delegate to the main window's local placeholder routine so
+                    // the styling is consistent across the app.
+                    parent_window.set_local_placeholder_image(pic, img_w, img_h);
+                } catch (GLib.Error e) {
+                    // If for some reason the parent can't render the local
+                    // placeholder, fall back to the per-source placeholder.
+                    set_placeholder_image_for_source(pic, img_w, img_h, article_src);
+                }
+            } else {
+                // Use an article-specific placeholder (so the preview shows the correct
+                // source branding even when the user's global prefs include multiple
+                // sources).
+                set_placeholder_image_for_source(pic, img_w, img_h, article_src);
+            }
+        }
+
+        if (will_load_image) {
+            int multiplier = (article_src == NewsSource.REDDIT) ? 2 : 3;
             int target_w = img_w * multiplier;
             int target_h = img_h * multiplier;
-            load_image_async(pic, thumbnail_url, target_w, target_h);
+            // Try to serve a cached preview texture synchronously for snappy
+            // preview opens. The cache key includes the requested size so we
+            // can store scaled variants separately.
+            bool loaded_from_cache = false;
+            try {
+                string key = make_preview_cache_key(thumbnail_url, target_w, target_h);
+                if (preview_cache != null) {
+                    var cached = preview_cache.get(key);
+                    if (cached != null) {
+                        try { pic.set_paintable(cached); } catch (GLib.Error e) { }
+                        loaded_from_cache = true;
+                    }
+                }
+            } catch (GLib.Error e) { /* ignore cache errors and continue to load */ }
+            if (!loaded_from_cache) load_image_async(pic, thumbnail_url, target_w, target_h);
         }
         pic_box.append(pic);
         outer.append(pic_box);
 
         // Snippet area
         var pad = new Gtk.Box(Orientation.VERTICAL, 8);
-        pad.set_margin_start(16);
-        pad.set_margin_end(16);
+        pad.set_margin_start(24);
+        pad.set_margin_end(24);
         pad.set_margin_top(16);
         pad.set_margin_bottom(16);
         var snippet_label = new Gtk.Label("Loading snippet…");
@@ -120,6 +204,7 @@ public class ArticleWindow : GLib.Object {
         // and be scrollable.
         snippet_label.set_lines(12);
         snippet_label.set_selectable(true);
+        snippet_label.set_can_focus(false);  // Prevent cursor from appearing
         snippet_label.set_justify(Gtk.Justification.LEFT);
         pad.append(snippet_label);
 
@@ -127,50 +212,138 @@ public class ArticleWindow : GLib.Object {
         outer.append(pad);
 
         // Buttons row
-        var actions = new Gtk.Box(Orientation.HORIZONTAL, 8);
-        actions.set_margin_start(16);
-        actions.set_margin_end(16);
+        var actions = new Gtk.Box(Orientation.HORIZONTAL, 12);
+        actions.set_margin_start(24);
+        actions.set_margin_end(24);
         actions.set_margin_bottom(24);
-        actions.set_halign(Gtk.Align.END);
+        actions.set_margin_top(8);
+        actions.set_halign(Gtk.Align.FILL);
+        actions.set_homogeneous(true);
+        
+        var back_local = new Gtk.Button.with_label("Close");
+        back_local.set_hexpand(true);
+        back_local.clicked.connect(() => {
+            // Close the overlay split view
+            if (preview_split != null) preview_split.set_show_sidebar(false);
+            back_btn.set_visible(false);
+            // Notify parent that the preview closed so it can mark the
+            // article as viewed now that the user returned to the main view.
+            try { parent_window.preview_closed(url); } catch (GLib.Error e) { }
+        });
+        
         var open_btn = new Gtk.Button.with_label("Open in browser");
+        open_btn.set_hexpand(true);
         open_btn.add_css_class("suggested-action");
         open_btn.clicked.connect(() => { try { AppInfo.launch_default_for_uri(url, null); } catch (GLib.Error e) { } });
-        var back_local = new Gtk.Button.with_label("Back");
-        back_local.clicked.connect(() => {
-            if (nav_view != null) nav_view.pop();
-            back_btn.set_visible(false);
-        });
+        
         actions.append(back_local);
         actions.append(open_btn);
         outer.append(actions);
 
-        // Put content into a scrolled window for overflow
-        var sc = new Gtk.ScrolledWindow();
-        sc.set_vexpand(true);
-        sc.set_hexpand(true);
-        sc.set_child(outer);
-
-        var page = new Adw.NavigationPage(sc, "Article");
-        nav_view.push(page);
+        // Add content to the preview container and show the overlay
+        if (preview_content_box != null) {
+            preview_content_box.append(outer);
+        }
+        
+        if (preview_split != null) {
+            preview_split.set_show_sidebar(true);
+        }
+        
+        // Clear any auto-selection on the title label after it's shown
+        Idle.add(() => {
+            try { ttl.select_region(0, 0); } catch (GLib.Error e) { }
+            return false;
+        });
+        
         back_btn.set_visible(true);
+        // Attach a one-shot handler to the shared header back button so
+        // clicks on that arrow also notify the parent preview-closed
+        // lifecycle. We disconnect the handler after it runs to avoid
+        // duplicate or stale callbacks.
+        try {
+            if (back_btn_handler_id != 0) {
+                try { back_btn.disconnect(back_btn_handler_id); } catch (GLib.Error e) { }
+                back_btn_handler_id = 0;
+            }
+            back_btn_handler_id = back_btn.clicked.connect(() => {
+                if (preview_split != null) preview_split.set_show_sidebar(false);
+                back_btn.set_visible(false);
+                try { parent_window.preview_closed(url); } catch (GLib.Error e) { }
+                // Disconnect this handler (one-shot)
+                try { back_btn.disconnect(back_btn_handler_id); } catch (GLib.Error e) { }
+                back_btn_handler_id = 0;
+            });
+        } catch (GLib.Error e) { }
         // Try to set metadata from any cached article entry (source + published time)
-        var prefs = NewsPreferences.get_instance();
+    var prefs = NewsPreferences.get_instance();
         string? homepage_published_any = null;
+        string? explicit_source_name = null;
         foreach (var item in parent_window.article_buffer) {
-            if (item.url == url && item.get_type().name() == "Paperboy.NewsArticle") {
-                var na = (Paperboy.NewsArticle)item;
-                homepage_published_any = na.published;
-                break;
+            if (item.url == url) {
+                // Prefer explicit per-item source name when available (ArticleItem)
+                try {
+                    if (item is ArticleItem) {
+                        var ai = (ArticleItem) item;
+                        explicit_source_name = ai.source_name;
+                    } else if (item.get_type().name() == "Paperboy.NewsArticle") {
+                        var na = (Paperboy.NewsArticle)item;
+                        homepage_published_any = na.published;
+                    }
+                } catch (GLib.Error e) { }
+                // Continue searching to prefer a Paperboy.NewsArticle published time if present
             }
         }
-        if (homepage_published_any != null && homepage_published_any.length > 0) {
-            meta_label.set_text(get_source_name(prefs.news_source) + " • " + format_published(homepage_published_any));
+        // Choose a sensible display name for the source. Prefer an explicit
+        // per-item source when present. Otherwise, derive a friendly name
+        // from the inferred NewsSource. If inference fell back to the
+        // user's default (e.g. NewsPreferences.news_source) while multiple
+        // preferred sources are enabled, try to derive a host-based name
+        // from the article URL so we don't incorrectly show a specific
+    // provider like "The Guardian".
+        string display_source = null;
+        if (explicit_source_name != null && explicit_source_name.length > 0) {
+            display_source = explicit_source_name;
         } else {
-            meta_label.set_text(get_source_name(prefs.news_source));
+            // Local News should prefer a user-friendly local label (city)
+            // when available so previews don't show unrelated provider names.
+            if (category_id != null && category_id == "local_news") {
+                if (prefs.user_location_city != null && prefs.user_location_city.length > 0)
+                    display_source = prefs.user_location_city;
+                else
+                    display_source = "Local News";
+            } else {
+                // If inference fell back to the user's global default (e.g. the
+                // user has set a single preferred source) but the article URL
+                // is from an unknown host, prefer a host-derived friendly name
+                // instead of always showing the global provider (avoids "The Guardian"
+                // appearing for local or miscellaneous feeds).
+                if (article_src == prefs.news_source) {
+                    string host = extract_host_from_url(url);
+                    if (host != null && host.length > 0) {
+                        // If the host clearly indicates a well-known provider (e.g. bbc,
+                        // guardian, nytimes), prefer the canonical brand name rather
+                        // than prettifying the host (which would turn "bbc" -> "Bbc").
+                        string lowhost = host.down();
+                        if (lowhost.index_of("bbc") >= 0 || lowhost.index_of("guardian") >= 0 || lowhost.index_of("nytimes") >= 0 || lowhost.index_of("wsj") >= 0 || lowhost.index_of("bloomberg") >= 0 || lowhost.index_of("reuters") >= 0 || lowhost.index_of("npr") >= 0 || lowhost.index_of("fox") >= 0) {
+                            display_source = get_source_name(article_src);
+                        } else {
+                            display_source = prettify_host(host);
+                        }
+                    }
+                }
+                if (display_source == null) display_source = get_source_name(article_src);
+            }
         }
 
+                // Debug traces removed from ArticleWindow
+
+                if (homepage_published_any != null && homepage_published_any.length > 0)
+                    meta_label.set_text(display_source + " • " + format_published(homepage_published_any));
+                else
+                    meta_label.set_text(display_source);
+
         // Use homepage snippet for Fox News if available
-        if (prefs.news_source == NewsSource.FOX) {
+    if (article_src == NewsSource.FOX) {
             // Try to get snippet from parent_window/article_buffer
             string? homepage_snippet = null;
             string? homepage_published = null;
@@ -183,10 +356,10 @@ public class ArticleWindow : GLib.Object {
                 }
             }
             if (homepage_published != null && homepage_published.length > 0) {
-                meta_label.set_text(get_source_name(prefs.news_source) + " • " + format_published(homepage_published));
+                meta_label.set_text(get_source_name(article_src) + " • " + format_published(homepage_published));
             } else {
                 // show just source name
-                meta_label.set_text(get_source_name(prefs.news_source));
+                meta_label.set_text(get_source_name(article_src));
             }
 
             if (homepage_snippet != null && homepage_snippet.length > 0) {
@@ -195,14 +368,22 @@ public class ArticleWindow : GLib.Object {
             }
         }
         // Otherwise, fetch snippet asynchronously
+        // Pass the already-chosen friendly display_source into the snippet
+        // fetcher so it doesn't overwrite our localized/host-derived label
+        // with the (potentially incorrect) global provider name.
         fetch_snippet_async(url, (text) => {
             string to_show = text.length > 0 ? text : "No preview available. Open the article to read more.";
             snippet_label.set_text(to_show);
-        }, meta_label);
+        }, meta_label, article_src, display_source);
         
     }
 
     private void load_image_async(Gtk.Picture image, string url, int target_w, int target_h) {
+        // Helper for preview cache keys
+        string make_preview_cache_key(string u, int w, int h) {
+            return u + "@" + w.to_string() + "x" + h.to_string();
+        }
+
         new Thread<void*>("load-image", () => {
             try {
                 // download initiated
@@ -252,31 +433,55 @@ public class ArticleWindow : GLib.Object {
                             // pixbuf loaded check
                             
                             if (pixbuf != null) {
-                                // Scale to fit if needed (only scale down for better quality)
+                                // Avoid expensive, high-quality downscaling on the main
+                                // thread which causes jank when opening previews. Instead:
+                                //  - Prefer to set the decoded pixbuf directly as a texture
+                                //    so the GPU can handle scaling where possible (fast).
+                                //  - Only perform a conservative BILINEAR downscale when the
+                                //    decoded image is extremely larger than the target area to
+                                //    avoid huge textures and excessive memory use.
+                                int device_scale = 1;
+                                try {
+                                    device_scale = image.get_scale_factor();
+                                    if (device_scale < 1) device_scale = 1;
+                                } catch (GLib.Error e) { device_scale = 1; }
+
+                                int eff_target_w = target_w * device_scale;
+                                int eff_target_h = target_h * device_scale;
+
                                 int width = pixbuf.get_width();
                                 int height = pixbuf.get_height();
-                                // image size available
-                                
-                                // Only scale down if image is larger than target, preserve quality
-                                if (width > target_w || height > target_h) {
-                                    double scale = double.min((double) target_w / width, (double) target_h / height);
+
+                                // If the image is massively larger than the effective target
+                                // (e.g., more than 3× in either dimension), downscale to a
+                                // reasonable cap using the faster BILINEAR interpolation.
+                                // This reduces memory and keeps the preview responsive.
+                                if ((width > eff_target_w * 3) || (height > eff_target_h * 3)) {
+                                    double scale = double.min((double)(eff_target_w * 2) / width,
+                                                              (double)(eff_target_h * 2) / height);
+                                    if (scale <= 0) scale = 1.0;
                                     int new_width = (int)(width * scale);
+                                    if (new_width < 1) new_width = 1;
                                     int new_height = (int)(height * scale);
-                                    // Ensure minimum quality - don't scale below reasonable size
-                                    if (new_width >= 64 && new_height >= 64) {
-                                        // Use HYPER interpolation for best quality when scaling down
-                                        pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.HYPER);
-                                        print("Scaled to: %dx%d\n", new_width, new_height);
-                                    } else {
-                                        print("Keeping original size - would scale too small\n");
-                                    }
-                                } else {
-                                    print("Keeping original size for better quality\n");
+                                    if (new_height < 1) new_height = 1;
+                                    // Use BILINEAR here for speed (trade a tiny amount of quality)
+                                    pixbuf = pixbuf.scale_simple(new_width, new_height, Gdk.InterpType.BILINEAR);
+                                    // Debug trace removed
                                 }
-                                
+
+                                // Create a texture directly from the (possibly resized) pixbuf
+                                // and hand it to the Gtk.Picture. Creating the texture is
+                                // relatively cheap compared to full HYPER resampling on the
+                                // main thread and yields a crisp result when the source image
+                                // has sufficient resolution.
                                 var texture = Gdk.Texture.for_pixbuf(pixbuf);
                                 image.set_paintable(texture);
-                                print("✓ Image set successfully\n");
+                                // Cache the texture for faster future preview opens.
+                                try {
+                                    string key = make_preview_cache_key(url, target_w, target_h);
+                                    if (preview_cache == null) preview_cache = new Gee.HashMap<string, Gdk.Texture>();
+                                    preview_cache.set(key, texture);
+                                } catch (GLib.Error e) { /* best-effort cache */ }
                             } else {
                                 // pixbuf null -> use placeholder
                                 set_placeholder_image(image, target_w, target_h);
@@ -328,6 +533,98 @@ public class ArticleWindow : GLib.Object {
             default:
                 return "News";
         }
+    }
+
+        // Infer source from a URL by checking known domain substrings. Falls back
+        // to the current prefs.news_source when uncertain. This mirrors the
+        // helper in appWindow so ArticleWindow can decide branding independently.
+        private NewsSource infer_source_from_url(string? url) {
+            var prefs = NewsPreferences.get_instance();
+            if (url == null || url.length == 0) return prefs.news_source;
+            string low = url.down();
+            if (low.index_of("guardian") >= 0 || low.index_of("theguardian") >= 0) return NewsSource.GUARDIAN;
+            if (low.index_of("bbc.co") >= 0 || low.index_of("bbc.") >= 0) return NewsSource.BBC;
+            if (low.index_of("reddit.com") >= 0 || low.index_of("redd.it") >= 0) return NewsSource.REDDIT;
+            if (low.index_of("nytimes") >= 0 || low.index_of("nyti.ms") >= 0) return NewsSource.NEW_YORK_TIMES;
+            if (low.index_of("wsj.com") >= 0 || low.index_of("dowjones") >= 0) return NewsSource.WALL_STREET_JOURNAL;
+            if (low.index_of("bloomberg") >= 0) return NewsSource.BLOOMBERG;
+            if (low.index_of("reuters") >= 0) return NewsSource.REUTERS;
+            if (low.index_of("npr.org") >= 0) return NewsSource.NPR;
+            if (low.index_of("foxnews") >= 0 || low.index_of("fox.com") >= 0) return NewsSource.FOX;
+            // Unknown, return preference as a sensible default
+            return prefs.news_source;
+        }
+
+    // Extract host portion from a URL (e.g., "https://www.example.com/path" -> "example.com").
+        private string extract_host_from_url(string? url) {
+            if (url == null) return "";
+            string u = url.strip();
+            if (u.length == 0) return "";
+            // Strip scheme
+            int scheme_end = u.index_of("://");
+            if (scheme_end >= 0) u = u.substring(scheme_end + 3);
+            // Cut at first slash
+        int slash = u.index_of("/");
+            if (slash >= 0) u = u.substring(0, slash);
+            // Remove port if present
+        int colon = u.index_of(":");
+            if (colon >= 0) u = u.substring(0, colon);
+            u = u.down();
+            // Strip common www prefix
+            if (u.has_prefix("www.")) u = u.substring(4);
+            return u;
+        }
+
+        // Turn a host like "example-news.co.uk" into a friendly display string
+        // such as "Example News". This is intentionally simple and is only
+        // used as a fallback when no explicit source name is available.
+    private string prettify_host(string host) {
+            if (host == null) return "News";
+            string h = host.strip();
+            if (h.length == 0) return "News";
+            // Take left-most label as the short name (e.g., "example-news")
+            int dot = h.index_of(".");
+            if (dot >= 0) h = h.substring(0, dot);
+            // Replace hyphens/underscores with spaces and split into words
+            h = h.replace("-", " ");
+            h = h.replace("_", " ");
+            // Capitalize words (ASCII-safe simple capitalization)
+            string out = "";
+            string[] parts = h.split(" ");
+            foreach (var p in parts) {
+                if (p.length == 0) continue;
+                string w = ascii_capitalize(p);
+                out += (out.length > 0 ? " " : "") + w;
+            }
+            // Handle common host-name quirks and a couple of branded exceptions
+            // e.g. "theguardian" -> "The Guardian", "nytimes" -> "NY Times"
+            string lower_out = out.down();
+            if (lower_out.has_prefix("the") && lower_out.length > 3 && lower_out.index_of(" ") < 0) {
+                // Split off the leading "the" into a separate word
+                string rest = lower_out.substring(3);
+                if (rest.length > 0) {
+                    // Capitalize the remainder nicely and return
+                    return "The " + ascii_capitalize(rest);
+                }
+            }
+            // Small exceptions map for well-known sites that are commonly
+            // concatenated in hosts.
+            if (lower_out == "nytimes" || lower_out == "ny time") return "NY Times";
+            if (lower_out == "wsj" || lower_out == "wallstreetjournal" || lower_out == "wallstreet") return "Wall Street Journal";
+            if (out.length == 0) return "News";
+            return out;
+        }
+
+    // Simple ASCII capitalization helper: first char upper, remainder lower.
+    private string ascii_capitalize(string s) {
+        if (s == null) return "";
+        if (s.length == 0) return s;
+        char c = s[0];
+        char up = c;
+        if (c >= 'a' && c <= 'z') up = (char)(c - 32);
+        string first = "%c".printf(up);
+        string rest = s.length > 1 ? s.substring(1).down() : "";
+        return first + rest;
     }
 
     private string? get_source_icon_path(NewsSource source) {
@@ -557,6 +854,19 @@ public class ArticleWindow : GLib.Object {
         }
     }
 
+    // Variant of set_placeholder_image that honors an explicit NewsSource. This
+    // lets previews and other per-article UI show the correct branding even
+    // when the user's preferences are set to "multiple sources".
+    private void set_placeholder_image_for_source(Gtk.Picture image, int width, int height, NewsSource source) {
+        string? icon_path = get_source_icon_path(source);
+        string source_name = get_source_name(source);
+        if (icon_path != null) {
+            create_icon_placeholder(image, icon_path, source, width, height);
+        } else {
+            create_source_text_placeholder(image, source_name, source, width, height);
+        }
+    }
+
     private void set_placeholder_image(Gtk.Picture image, int width, int height) {
         // Get source icon and create branded placeholder
         var prefs = NewsPreferences.get_instance();
@@ -672,7 +982,7 @@ public class ArticleWindow : GLib.Object {
     }
 
     // Fetch a short snippet from an article URL using common meta tags or first paragraph
-    private void fetch_snippet_async(string url, SnippetCallback on_done, Gtk.Label? meta_label = null) {
+    private void fetch_snippet_async(string url, SnippetCallback on_done, Gtk.Label? meta_label, NewsSource source, string? display_source) {
         new Thread<void*>("snippet-fetch", () => {
             string result = "";
             string published = "";
@@ -730,9 +1040,15 @@ public class ArticleWindow : GLib.Object {
             }
             string final = result;
             Idle.add(() => {
-                // If we discovered a published time, set the meta label too
+                // If we discovered a published time, set the meta label too.
+                // Use the display_source chosen by the preview logic when
+                // available so that the snippet fetcher doesn't overwrite a
+                // more specific/local label (for example the user's city for
+                // Local News) with the application's global source name.
                 if (meta_label != null && published.length > 0) {
-                    meta_label.set_text(get_source_name(NewsPreferences.get_instance().news_source) + " • " + format_published(published));
+                    string label_to_use = (display_source != null && display_source.length > 0) ? display_source : get_source_name(source);
+                    // Debug traces removed from fetch_snippet_async
+                    meta_label.set_text(label_to_use + " • " + format_published(published));
                 }
                 on_done(final);
                 return false;
@@ -882,5 +1198,10 @@ public class ArticleWindow : GLib.Object {
         // Use the same margins as the main window
         const int H_MARGIN = 12;
         return clampi(w - (H_MARGIN * 2), 600, 4096);
+    }
+
+    // Generate a cache key for preview textures (url + requested size)
+    private string make_preview_cache_key(string u, int w, int h) {
+        return u + "@" + w.to_string() + "x" + h.to_string();
     }
 }
