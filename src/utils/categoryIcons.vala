@@ -195,9 +195,19 @@ public class CategoryIcons : GLib.Object {
                     }
                     if (use_path.has_suffix(".svg")) {
                         try {
-                            var img = new Gtk.Image.from_file(use_path);
-                            img.set_pixel_size(size);
-                            return img;
+                            // Rasterize SVG to a higher-resolution pixbuf to avoid
+                            // blur on small sizes and when running on a HiDPI
+                            // display. Rendering at 2x the requested size then
+                            // scaling down improves visual crispness for icons.
+                            int render_size = size * 2;
+                            var pix_hi = new Gdk.Pixbuf.from_file_at_size(use_path, render_size, render_size);
+                            if (pix_hi != null) {
+                                var tex = Gdk.Texture.for_pixbuf(pix_hi);
+                                var img = new Gtk.Image();
+                                try { img.set_from_paintable(tex); } catch (GLib.Error e) { }
+                                img.set_pixel_size(size);
+                                return img;
+                            }
                         } catch (GLib.Error e) {
                             // Fall back to pixbuf path below on error
                         }
