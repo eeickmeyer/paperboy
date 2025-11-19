@@ -1078,9 +1078,9 @@ public class PrefsDialog : GLib.Object {
     var about = new Adw.AboutDialog();
     about.set_application_name("Paperboy");
     about.set_application_icon("paperboy"); // Use the correct icon name
-    about.set_version("0.1");
+    about.set_version("0.4a");
     about.set_developer_name("thecalamityjoe87 (Isaac Joseph)");
-    about.set_comments("A beautiful news viewer for GNOME");
+    about.set_comments("A simple news app written in Vala, built with GTK4 and Libadwaita ");
     about.set_website("https://github.com/thecalamityjoe87/paperboy");
     about.set_license_type(Gtk.License.GPL_3_0);
     about.set_copyright("© 2025 thecalamityjoe87");
