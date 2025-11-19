@@ -19,7 +19,7 @@ Some cool features of Paperboy:
 - **Lets you build a custom feed** by combining any sources and categories you want.
 - **Includes local news support**, so you can see what’s happening near you.
 
-### --Warning--
+### WARNING
 This app is very much so in an alpha state. It will definitely eat your dogs and throw your kittens outside. It's functional, but it's still very much so a WIP.
 
 ## Build dependencies
