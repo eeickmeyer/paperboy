@@ -45,33 +45,10 @@ public class PrefsDialog : GLib.Object {
                 int cpos = q.index_of(",");
                 if (cpos > 0) q = q.substring(0, cpos).strip();
 
-                // Try to locate a repo-local `tools/rssFinder` by searching
-                // upward from the current working directory. This helps when
-                // the app is launched from a different CWD (e.g. via the
-                // desktop launcher) but the repository tree is nearby.
-                // Try a handful of likely repo-local and build locations before
-                // falling back to PATH. We avoid walking parents (some GLib
-                // helpers aren't exposed in the Vala bindings on all systems),
-                // and instead check common relative locations used during
-                // development.
-                string[] candidates = {
-                    "./tools/rssFinder",
-                    "tools/rssFinder",
-                    "../tools/rssFinder",
-                    "build/tools/rssFinder",
-                    "./build/tools/rssFinder",
-                    "/usr/local/bin/rssFinder",
-                    "/usr/bin/rssFinder"
-                };
-                string found = "";
-                foreach (var cand in candidates) {
-                    try {
-                        if (GLib.FileUtils.test(cand, GLib.FileTest.EXISTS | GLib.FileTest.IS_REGULAR)) {
-                            found = cand;
-                            break;
-                        }
-                    } catch (GLib.Error ee) { }
-                }
+                // Use a helper to locate the `rssFinder` helper. This keeps the
+                // path-selection logic centralized and easier to test; it also
+                // avoids repeated code in the function body.
+                string? found = locate_rssfinder();
                 string prog;
                 SpawnFlags flags;
                 if (found.length > 0) {
@@ -198,6 +175,70 @@ public class PrefsDialog : GLib.Object {
             }
             return null;
         });
+    }
+
+    // Locate the rssFinder binary with a structured search. The priority
+    // is: PATH (via GLib.find_program_in_path), local repo, build dir,
+    // Meson-configured bindir, and a small set of common system paths.
+    private static string? locate_rssfinder() {
+        try {
+            // We rely on the SpawnFlags.SEARCH_PATH fallback below if
+            // nothing is found here. Using PATH lookups here is not
+            // portable across all GLib versions via Vala; instead we
+            // prefer an explicit candidate search followed by the
+            // `SpawnFlags.SEARCH_PATH` fallback.
+
+            // Local repo and build locations (developer-friendly)
+            string[] dev_candidates = {
+                "./tools/rssFinder",
+                "tools/rssFinder",
+                "../tools/rssFinder",
+                "build/tools/rssFinder",
+                "./build/tools/rssFinder",
+                "build/rssFinder",
+                "./build/rssFinder"
+            };
+
+            foreach (var c in dev_candidates) {
+                try {
+                    if (GLib.FileUtils.test(c, GLib.FileTest.EXISTS | GLib.FileTest.IS_REGULAR)) {
+                        AppDebugger.log_if_enabled("/tmp/paperboy-debug.log", "rssFinder candidate found: " + c);
+                        return c;
+                    }
+                } catch (GLib.Error e) { }
+            }
+
+            // Meson-configured bindir (respects install prefix)
+            try {
+                string b = BuildConstants.RSSFINDER_BINDIR;
+                if (b != null && b.length > 0) {
+                    string installed = GLib.Path.build_filename(b, "rssFinder");
+                    if (GLib.FileUtils.test(installed, GLib.FileTest.EXISTS | GLib.FileTest.IS_REGULAR)) {
+                        AppDebugger.log_if_enabled("/tmp/paperboy-debug.log", "rssFinder installed in bindir: " + installed);
+                        return installed;
+                    }
+                    string installed_lower = GLib.Path.build_filename(b, "rssfinder");
+                    if (GLib.FileUtils.test(installed_lower, GLib.FileTest.EXISTS | GLib.FileTest.IS_REGULAR)) {
+                        AppDebugger.log_if_enabled("/tmp/paperboy-debug.log", "rssfinder installed in bindir: " + installed_lower);
+                        return installed_lower;
+                    }
+                }
+            } catch (GLib.Error e) { }
+
+            // Final system fallbacks - warned but used rarely.
+            string[] sys_fallbacks = { "/usr/local/bin/rssFinder", "/usr/local/bin/rssfinder", "/usr/bin/rssFinder", "/usr/bin/rssfinder" };
+            foreach (var s in sys_fallbacks) {
+                try {
+                    if (GLib.FileUtils.test(s, GLib.FileTest.EXISTS | GLib.FileTest.IS_REGULAR)) {
+                        AppDebugger.log_if_enabled("/tmp/paperboy-debug.log", "rssFinder system fallback: " + s);
+                        return s;
+                    }
+                } catch (GLib.Error e) { }
+            }
+        } catch (GLib.Error e) { }
+        // Not found
+        AppDebugger.log_if_enabled("/tmp/paperboy-debug.log", "rssFinder not found in candidates");
+        return null;
     }
     
     public static void show_source_dialog(Gtk.Window parent) {

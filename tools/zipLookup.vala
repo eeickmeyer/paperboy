@@ -113,6 +113,22 @@ public class ZipLookup : GLib.Object {
             }
         }
 
+        // Also look through system data directories (e.g. /usr/local/share or /usr/share)
+        // in case the application was installed system-wide by Meson. The dev
+        // `data/` paths above are used during development; keep them first so
+        // local worktrees can be used without installing.
+        if (csv_path == null) {
+            try {
+                string[] sys_dirs = GLib.Environment.get_system_data_dirs();
+                foreach (var s in sys_dirs) {
+                    string candidate = GLib.Path.build_filename(s, "paperboy", "us_zips.csv");
+                    if (GLib.FileUtils.test(candidate, GLib.FileTest.EXISTS)) { csv_path = candidate; break; }
+                }
+            } catch (GLib.Error e) {
+                // best-effort
+            }
+        }
+
         if (csv_path == null) return; // no CSV available
 
         try {
