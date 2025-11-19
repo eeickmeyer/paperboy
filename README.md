@@ -10,7 +10,14 @@
 ![Alt text](https://github.com/thecalamityjoe87/paperboy/blob/main/images/screenshot3.png?raw=true "Optional Title")
 
 ## About
-A simple Vala/GTK news app. I built this app because I wanted to have a simple, but beautiful native GTK4 news application. Feel free to test, change, and contribute back to this project.
+A simple news app written in Vala, built with GTK4 and Libadwaita. My motivation for building this app because I wanted to have a simple, but beautiful native GTK4 news application similar to Apple News. Feel free to test, change, and contribute back to this project.
+
+Some cool features of Paperboy:
+
+- Ships with curated sources like The Guardian, Reddit, BBC, and FOX News.
+- Fetches articles through PaperboyAPI, a custom API that aggregates news from multiple sources and categories.
+- Lets you build a custom feed by combining any sources and categories you want.
+- Includes local news support, so you can see what’s happening near you.
 
 ### --Warning--
 This app is very much so in an alpha state. It will definitely eat your dogs and throw your kittens outside. It's functional, but it's still very much so a WIP.
@@ -28,7 +35,7 @@ Common distro install commands are provided below.
 ## Building
 Common distro install commands:
 
-Debian / Ubuntu (example):
+Debian / Ubuntu:
 
 ```bash
 sudo apt update
@@ -37,7 +44,7 @@ sudo apt install build-essential valac meson ninja-build pkg-config \
 	libgdk-pixbuf2.0-dev libxml2-dev libgee-0.8-dev
 ```
 
-Fedora (example):
+Fedora:
 
 ```bash
 sudo dnf install @development-tools vala meson ninja pkgconf-pkg-config \
@@ -45,7 +52,7 @@ sudo dnf install @development-tools vala meson ninja pkgconf-pkg-config \
 	gdk-pixbuf2-devel libxml2-devel gee-devel
 ```
 
-Arch Linux (example):
+Arch Linux:
 
 ```bash
 sudo pacman -S --needed base-devel vala meson ninja pkgconf \
@@ -72,10 +79,5 @@ meson compile -C build
 sudo ninja -C build install
 ```
 
-
-
-## Developer notes
-
-- The content-area header now shows only the selected category icon and text. It will no longer append or change based on the selected news source (single or multiple). This simplifies the header and avoids source-influenced label changes.
 
 
