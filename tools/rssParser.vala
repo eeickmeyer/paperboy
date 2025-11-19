@@ -21,6 +21,10 @@ using Xml;
 using Gee;
 
 public class RssParser {
+    // Cap for number of items to process per LOCAL feed; this prevents a
+    // single local RSS feed from adding an unbounded number of articles
+    // which can cause memory to grow quickly when many local feeds exist.
+    private const int LOCAL_FEED_MAX_ITEMS = 12;
     
     public static void parse_rss_and_display(
         string body,
@@ -142,6 +146,18 @@ public class RssParser {
                                 }
                             }
                             if (title != null && link != null) {
+                                // If this is a Local News feed, cap the number of
+                                // items we track from this single feed. This helps
+                                // control memory growth for users that have large
+                                // numbers of local feeds configured.
+                                if (category_id == "local_news" && items.size >= LOCAL_FEED_MAX_ITEMS) {
+                                    try {
+                                        if (GLib.Environment.get_variable("PAPERBOY_DEBUG") != null) {
+                                            warning("rssParser: local feed cap reached (%d): %s", LOCAL_FEED_MAX_ITEMS, source_name);
+                                        }
+                                    } catch (GLib.Error e) { }
+                                    continue;
+                                }
                                 var row = new Gee.ArrayList<string?>();
                                 // If the feed provided a BBC thumbnail, try normalizing it to a larger CDN variant
                                 if (thumb != null && bbc_enabled) {

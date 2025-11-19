@@ -723,6 +723,9 @@ public class PrefsDialog : GLib.Object {
         personalized_row.add_suffix(suffix_box);
         main_container.append(personalized_row);
 
+        // No Local News image limit preference: keep UX simple and load a
+        // small, fixed amount by default to avoid excessive memory use.
+
         // Create categories pane (initially hidden) that slides in over main
         var categories_container = new Gtk.Box(Gtk.Orientation.VERTICAL, 6);
         categories_container.set_margin_top(6);

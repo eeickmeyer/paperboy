@@ -199,10 +199,17 @@ public class NewsWindow : Adw.ApplicationWindow {
     private int articles_shown = 0;
     private int articles_pending = 0;  // Articles queued but not yet rendered
     private const int INITIAL_ARTICLE_LIMIT = 25;  // Show 25 articles initially, rest behind Load More
+    // Number of Local News items for which we'll fetch full-size images
+    // at initial load. Items beyond this limit show placeholders until
+    // the user triggers a load (e.g., scroll, click, or 'Load More').
+    private const int LOCAL_NEWS_IMAGE_LOAD_LIMIT = 12;
     private Gtk.Button? load_more_button = null;
     private uint buffer_flush_timeout_id = 0;
     // Fetch sequencing token to ignore stale background fetch callbacks
-    private uint fetch_sequence = 0;
+    // Public read-only generation token used by async operations to determine
+    // whether results are still valid for the current fetch. Exposed as a
+    // public property with private setter so experiments can snapshot it.
+    public uint fetch_sequence { get; private set; }
     
     // Loading spinner for initial content load
     private Gtk.Spinner? loading_spinner = null;
@@ -1576,11 +1583,13 @@ public class NewsWindow : Adw.ApplicationWindow {
             prefs.category == "business" || 
             prefs.category == "entertainment" || 
             prefs.category == "politics" ||
+            prefs.category == "lifestyle" || 
             prefs.category == "markets" ||
             prefs.category == "industries" ||
             prefs.category == "economics" ||
-            prefs.category == "wealth" ||
+            prefs.category == "wealth" || 
             prefs.category == "green"
+            || prefs.category == "local_news"
         );
         
         if (viewing_limited_category) {
@@ -1986,11 +1995,13 @@ public class NewsWindow : Adw.ApplicationWindow {
             check_category == "business" || 
             check_category == "entertainment" || 
             check_category == "politics" ||
+            check_category == "lifestyle" || 
             check_category == "markets" ||
             check_category == "industries" ||
             check_category == "economics" ||
             check_category == "wealth" ||
             check_category == "green"
+            || check_category == "local_news"
         );
         
         try {
@@ -2149,7 +2160,8 @@ public class NewsWindow : Adw.ApplicationWindow {
             }
 
             if (hero_will_load) {
-                int multiplier = (prefs.news_source == NewsSource.REDDIT) ? (initial_phase ? 2 : 2) : (initial_phase ? 1 : 4);
+                // Request higher-resolution carousel slide images as well
+                int multiplier = (prefs.news_source == NewsSource.REDDIT) ? (initial_phase ? 2 : 6) : (initial_phase ? 2 : 6);
                 if (initial_phase) pending_images++;
                 image_handler.load_image_async(hero_card.image, thumbnail_url, default_hero_w * multiplier, default_hero_h * multiplier);
                 hero_requests.set(hero_card.image, new HeroRequest(thumbnail_url, default_hero_w * multiplier, default_hero_h * multiplier, multiplier));
@@ -2283,7 +2295,8 @@ public class NewsWindow : Adw.ApplicationWindow {
                 }
             }
             if (slide_will_load) {
-                int multiplier = (prefs.news_source == NewsSource.REDDIT) ? (initial_phase ? 2 : 2) : (initial_phase ? 1 : 4);
+                // Request higher-resolution carousel slide images as well
+                int multiplier = (prefs.news_source == NewsSource.REDDIT) ? (initial_phase ? 2 : 6) : (initial_phase ? 2 : 6);
                 if (initial_phase) pending_images++;
                 image_handler.load_image_async(slide_image, thumbnail_url, default_w * multiplier, default_h * multiplier);
                 hero_requests.set(slide_image, new HeroRequest(thumbnail_url, default_w * multiplier, default_h * multiplier, multiplier));
@@ -2400,7 +2413,40 @@ public class NewsWindow : Adw.ApplicationWindow {
         string _norm = normalize_article_url(url);
 
         if (card_will_load) {
+            // For Local News category, only load images for the first
+            // LOCAL_NEWS_IMAGE_LOAD_LIMIT items to avoid allocating many
+            // large textures simultaneously. Users still see full-quality
+            // images for early/browsable content, and previews load the
+            // full image when opened.
+            if (category_id == "local_news" && !bypass_limit) {
+                try {
+                        if (articles_shown >= LOCAL_NEWS_IMAGE_LOAD_LIMIT) {
+                        // Skip loading image for this card — show the app-local
+                        // placeholder instead. This preserves quality for early
+                        // items while keeping memory usage reasonable.
+                        set_local_placeholder_image(article_card.image, img_w, img_h);
+                        // Still register the picture so any later update (e.g., when
+                        // 'Load More' is shown) will be applied consistently.
+                        register_picture_for_url(_norm, article_card.image);
+                        try {
+                            string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                            if (dbg != null && dbg.length > 0) {
+                                append_debug_log("Local News: skipped image load for item index=" + articles_shown.to_string() + " url=" + _norm);
+                            }
+                        } catch (GLib.Error e) { }
+                        // Do not initiate network request
+                        card_will_load = false;
+                    }
+                } catch (GLib.Error e) { }
+            }
             int multiplier = (prefs.news_source == NewsSource.REDDIT) ? (initial_phase ? 2 : 2) : (initial_phase ? 1 : 3);
+            // When viewing Local News, downscale aggressively to avoid creating
+            // many large textures — local feeds often contain many small items
+            // and we want to keep memory bounded.
+            // Don't reduce image quality by default; instead, only load
+            // images for the first N items (user-configurable) and
+            // show placeholders for the rest to conserve memory while
+            // keeping high-quality images for early/visible items.
             if (initial_phase) pending_images++;
             // Caller retains image-load logic; register picture for in-place updates
             image_handler.load_image_async(article_card.image, thumbnail_url, img_w * multiplier, img_h * multiplier);
@@ -3560,6 +3606,10 @@ public class NewsWindow : Adw.ApplicationWindow {
         // CRITICAL: Clear the memory texture cache to free large textures
         memory_meta_cache.clear();
         thumbnail_cache.clear();
+        // Also clear the shared preview cache to free textures created by
+        // article previews. This avoids retaining additional Gdk.Texture
+        // objects across category switches.
+        try { PreviewCacheManager.clear_cache(); } catch (GLib.Error e) { }
         
         // Clear disk image cache but preserve metadata (viewed states, etc)
         if (meta_cache != null) {
@@ -3647,6 +3697,17 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Clean up category tracking
         recent_category_queue.clear();
         articles_shown = 0;
+
+        // Adjust preview cache size for Local News view to conserve memory.
+        // Local News can have many items; reduce preview cache to a small number
+        // when active. Restore default capacity for other views.
+        try {
+            if (prefs.category == "local_news") {
+                try { PreviewCacheManager.get_cache().set_capacity(6); } catch (GLib.Error e) { }
+            } else {
+                try { PreviewCacheManager.get_cache().set_capacity(12); } catch (GLib.Error e) { }
+            }
+        } catch (GLib.Error e) { }
         
         // Cancel any pending buffer flush
         if (buffer_flush_timeout_id > 0) {
@@ -3846,6 +3907,8 @@ public class NewsWindow : Adw.ApplicationWindow {
         // Throttled add for Local News: queue incoming items and process in small batches
         var local_news_queue = new Gee.ArrayList<ArticleItem>();
         bool local_news_flush_scheduled = false;
+        int local_news_items_enqueued = 0; // debug counter
+        bool local_news_stats_scheduled = false;
         // General UI add queue to batch worker->main-thread article additions.
         // Using a single Idle to drain this queue avoids per-item refs on the
         // window/object and reduces thread churn that previously caused races
@@ -3873,11 +3936,13 @@ public class NewsWindow : Adw.ApplicationWindow {
                 self_ref.prefs.category == "business" || 
                 self_ref.prefs.category == "entertainment" || 
                 self_ref.prefs.category == "politics" ||
+                self_ref.prefs.category == "lifestyle" || 
                 self_ref.prefs.category == "markets" ||
                 self_ref.prefs.category == "industries" ||
                 self_ref.prefs.category == "economics" ||
                 self_ref.prefs.category == "wealth" ||
                 self_ref.prefs.category == "green"
+                || self_ref.prefs.category == "local_news"
             );
             
             try {
@@ -3894,6 +3959,7 @@ public class NewsWindow : Adw.ApplicationWindow {
                 var prefs_local = NewsPreferences.get_instance();
                 if (prefs_local != null && prefs_local.category == "local_news") {
                     local_news_queue.add(new ArticleItem(title, url, thumbnail, category_id, source_name));
+                    local_news_items_enqueued++;
                     if (!local_news_flush_scheduled) {
                         local_news_flush_scheduled = true;
                         // Process up to 6 items per tick to keep UI responsive
@@ -4124,6 +4190,26 @@ public class NewsWindow : Adw.ApplicationWindow {
                 found_feed = true;
                 RssParser.fetch_rss_url(u, "Local Feed", "Local News", "local_news", current_search_query, session, label_fn, no_op_clear, wrapped_add);
             }
+            try {
+                string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
+                if (dbg != null && dbg.length > 0) {
+                    // Log the fact that we scheduled multiple local feeds — helpful
+                    // when diagnosing memory spikes from many small feeds.
+                    append_debug_log("Local News: scheduled " + lines.length.to_string() + " feed candidates");
+                    // Also schedule a short timeout to report how many items were enqueued
+                    // for UI processing. This gets updated as RssParser.fetch_rss_url
+                    // invokes `wrapped_add` asynchronously.
+                    if (!local_news_stats_scheduled) {
+                        local_news_stats_scheduled = true;
+                        Timeout.add(250, () => {
+                            try {
+                                append_debug_log("Local News: enqueued items=" + local_news_items_enqueued.to_string() + " queue_size=" + local_news_queue.size.to_string());
+                            } catch (GLib.Error e) { }
+                            return false;
+                        });
+                    }
+                }
+            } catch (GLib.Error e) { }
             if (!found_feed) {
                 try { wrapped_set_label("Local News — No local feeds configured"); } catch (GLib.Error e) { }
             }

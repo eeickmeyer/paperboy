@@ -30,8 +30,10 @@ public class ArticlePane : GLib.Object {
     private Adw.OverlaySplitView? preview_split;
     private Gtk.Box? preview_content_box;
     // In-memory cache for article preview textures (url@WxH -> Gdk.Texture).
-    // Kept local to ArticleWindow to avoid touching NewsWindow's private cache.
-    private static Gee.HashMap<string, Gdk.Texture>? preview_cache = null;
+    // Use an LRU cache with a small capacity so previews don't accumulate
+    // indefinitely and cause unbounded memory growth.
+    // Use a shared preview cache managed by PreviewCacheManager so the
+    // main window can clear preview textures on category switches.
 
     // Centralized debug log path for this module. Use this variable so the
     // path can be adjusted in one place if we change where debug output
@@ -45,9 +47,11 @@ public class ArticlePane : GLib.Object {
         nav_view = navigation_view;
         session = soup_session;
         parent_window = window;
-        // Initialize preview cache on first construction
-        if (preview_cache == null) preview_cache = new Gee.HashMap<string, Gdk.Texture>();
+        // Initialize shared preview cache (centralized)
+        try { PreviewCacheManager.get_cache(); } catch (GLib.Error e) { }
     }
+
+    // (Preview cache clearing is now centralized in PreviewCacheManager.)
     
     // Set the preview overlay components (called after ArticleWindow construction)
     public void set_preview_overlay(Adw.OverlaySplitView split, Gtk.Box content_box) {
@@ -255,12 +259,10 @@ public class ArticlePane : GLib.Object {
             bool loaded_from_cache = false;
             try {
                 string key = make_preview_cache_key(thumbnail_url, target_w, target_h);
-                if (preview_cache != null) {
-                    var cached = preview_cache.get(key);
-                    if (cached != null) {
-                        try { pic.set_paintable(cached); } catch (GLib.Error e) { }
-                        loaded_from_cache = true;
-                    }
+                var cached = PreviewCacheManager.get_cache().get(key);
+                if (cached != null) {
+                    try { pic.set_paintable(cached); } catch (GLib.Error e) { }
+                    loaded_from_cache = true;
                 }
             } catch (GLib.Error e) { /* ignore cache errors and continue to load */ }
             if (!loaded_from_cache) load_image_async(pic, thumbnail_url, target_w, target_h, article_src);
@@ -468,6 +470,9 @@ public class ArticlePane : GLib.Object {
             return u + "@" + w.to_string() + "x" + h.to_string();
         }
 
+        uint gen_seq = 0;
+        try { gen_seq = parent_window.fetch_sequence; } catch (GLib.Error e) { gen_seq = 0; }
+
         new Thread<void*>("load-image", () => {
             try {
                 // download initiated
@@ -517,6 +522,12 @@ public class ArticlePane : GLib.Object {
                             // pixbuf loaded check
                             
                             if (pixbuf != null) {
+                                // If the category changed while this image was loading
+                                // ignore the result so we don't repopulate caches.
+                                if (parent_window.fetch_sequence != gen_seq) {
+                                    try { parent_window.append_debug_log("preview-load: stale image ignored for " + url); } catch (GLib.Error e) { }
+                                    return false;
+                                }
                                 // Avoid expensive, high-quality downscaling on the main
                                 // thread which causes jank when opening previews. Instead:
                                 //  - Prefer to set the decoded pixbuf directly as a texture
@@ -563,8 +574,7 @@ public class ArticlePane : GLib.Object {
                                 // Cache the texture for faster future preview opens.
                                 try {
                                     string key = make_preview_cache_key(url, target_w, target_h);
-                                    if (preview_cache == null) preview_cache = new Gee.HashMap<string, Gdk.Texture>();
-                                    preview_cache.set(key, texture);
+                                    PreviewCacheManager.get_cache().set(key, texture);
                                 } catch (GLib.Error e) { /* best-effort cache */ }
                                 } else {
                                 // pixbuf null -> use placeholder
