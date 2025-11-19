@@ -49,7 +49,7 @@ Fedora:
 ```bash
 sudo dnf install @development-tools vala meson ninja pkgconf-pkg-config \
 	gtk4-devel libadwaita-devel libsoup-devel json-glib-devel \
-	gdk-pixbuf2-devel libxml2-devel gee-devel
+	gdk-pixbuf2-devel libxml2-devel libgee-devel
 ```
 
 Arch Linux:
