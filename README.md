@@ -4,8 +4,10 @@
 
 # **Paperboy (Vala + GTK)**
 
+![Alt text](https://github.com/thecalamityjoe87/paperboy/blob/main/images/screenshot.png?raw=true "Optional Title")
 ![Alt text](https://github.com/thecalamityjoe87/paperboy/blob/main/images/screenshot1.png?raw=true "Optional Title")
 ![Alt text](https://github.com/thecalamityjoe87/paperboy/blob/main/images/screenshot2.png?raw=true "Optional Title")
+![Alt text](https://github.com/thecalamityjoe87/paperboy/blob/main/images/screenshot3.png?raw=true "Optional Title")
 
 ## About
 A simple Vala/GTK news app. I built this app because I wanted to have a simple, but beautiful native GTK4 news application. Feel free to test, change, and contribute back to this project.
