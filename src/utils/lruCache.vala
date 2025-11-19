@@ -89,11 +89,11 @@ public class LruCache<K, V> : GLib.Object {
                 try {
                     V? val = null;
                     try { val = map.get(oldest); } catch (GLib.Error e) { val = null; }
+                    // Notify caller about eviction (best-effort) before removing
+                    // the entry from the backing map so the callback can operate
+                    // on the live object safely.
+                    try { if (on_evict != null && val != null) on_evict(oldest, val); } catch (GLib.Error e) { }
                     try { map.remove(oldest); } catch (GLib.Error e) { }
-                    // Notify caller about eviction (best-effort)
-                    try {
-                        if (on_evict != null && val != null) on_evict(oldest, val);
-                    } catch (GLib.Error e) { }
                     // Optional debug output when PAPERBOY_DEBUG is set (best-effort)
                     try {
                         string? dbg = GLib.Environment.get_variable("PAPERBOY_DEBUG");
@@ -122,10 +122,8 @@ public class LruCache<K, V> : GLib.Object {
             try { order.remove(key); } catch (GLib.Error e) { }
             V? val = null;
             try { val = map.get(key); } catch (GLib.Error e) { val = null; }
+            try { if (on_evict != null && val != null) on_evict(key, val); } catch (GLib.Error e) { }
             r = map.remove(key);
-            try {
-                if (on_evict != null && val != null) on_evict(key, val);
-            } catch (GLib.Error e) { }
         } catch (GLib.Error e) { r = false; }
         return r;
     }
@@ -166,8 +164,8 @@ public class LruCache<K, V> : GLib.Object {
             try {
                 V? val = null;
                 try { val = map.get(oldest); } catch (GLib.Error e) { val = null; }
-                try { map.remove(oldest); } catch (GLib.Error e) { }
                 try { if (on_evict != null && val != null) on_evict(oldest, val); } catch (GLib.Error e) { }
+                try { map.remove(oldest); } catch (GLib.Error e) { }
             } catch (GLib.Error e) { }
         }
     }

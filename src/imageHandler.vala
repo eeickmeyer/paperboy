@@ -69,6 +69,12 @@ public class ImageHandler : GLib.Object {
         // causing crashes; we can replace with a safer pooled implementation
         // later (for example using GLib.ThreadPool or a C-level queue).
         // CRITICAL: Soup.Message is NOT thread-safe in a shared pool context!
+        // Snapshot the current window fetch sequence so we can ignore
+        // downloads that complete after the user has switched categories
+        // (the UI will schedule a new fetch and bump `fetch_sequence`).
+        uint gen_seq = 0;
+        try { gen_seq = window.fetch_sequence; } catch (GLib.Error e) { gen_seq = 0; }
+
         new Thread<void*>("image-download", () => {
             GLib.AtomicInt.inc(ref NewsWindow.active_downloads);
             try {
@@ -87,6 +93,14 @@ public class ImageHandler : GLib.Object {
 
                 if (news_src == NewsSource.REDDIT && msg.response_body.length > 2 * 1024 * 1024) {
                     Idle.add(() => {
+                        // If the fetch sequence changed since this download started,
+                        // the results no longer belong to the current view. Avoid
+                        // populating caches and painting images for stale fetches.
+                        if (window.fetch_sequence != gen_seq) {
+                            try { window.append_debug_log("image-download: stale download ignored for url=" + url); } catch (GLib.Error e) { }
+                            try { window.pending_downloads.remove(url); } catch (GLib.Error e) { }
+                            return false;
+                        }
                         var list = window.pending_downloads.get(url);
                         if (list != null) {
                             foreach (var pic in list) {
@@ -130,6 +144,11 @@ public class ImageHandler : GLib.Object {
                                             string k = window.make_cache_key(url, sw, sh);
                                             var pb_for_idle = pix;
                                             Idle.add(() => {
+                                                if (window.fetch_sequence != gen_seq) {
+                                                    try { window.append_debug_log("image-download: stale 304 handler ignored for url=" + url); } catch (GLib.Error e) { }
+                                                    try { window.pending_downloads.remove(url); } catch (GLib.Error e) { }
+                                                    return false;
+                                                }
                                                 try {
                                                     Gdk.Texture? texture = null;
                                                     texture = Gdk.Texture.for_pixbuf(pb_for_idle);
@@ -158,6 +177,11 @@ public class ImageHandler : GLib.Object {
                                         } else {
                                             var pb_for_idle = pix;
                                             Idle.add(() => {
+                                                if (window.fetch_sequence != gen_seq) {
+                                                    try { window.append_debug_log("image-download: stale 304 fallback ignored for url=" + url); } catch (GLib.Error e) { }
+                                                    try { window.pending_downloads.remove(url); } catch (GLib.Error e) { }
+                                                    return false;
+                                                }
                                                 try {
                                                     var texture = Gdk.Texture.for_pixbuf(pb_for_idle);
                                                     if (pb_for_idle.get_width() <= 64 && pb_for_idle.get_height() <= 64) window.thumbnail_cache.set(url, texture);
@@ -190,6 +214,11 @@ public class ImageHandler : GLib.Object {
                                 } else {
                                     var pb_for_idle = pix;
                                     Idle.add(() => {
+                                        if (window.fetch_sequence != gen_seq) {
+                                            try { window.append_debug_log("image-download: stale worker ignored for url=" + url); } catch (GLib.Error e) { }
+                                            try { window.pending_downloads.remove(url); } catch (GLib.Error e) { }
+                                            return false;
+                                        }
                                         try {
                                             var texture = Gdk.Texture.for_pixbuf(pb_for_idle);
                                             if (pb_for_idle.get_width() <= 64 && pb_for_idle.get_height() <= 64) window.thumbnail_cache.set(url, texture);
@@ -222,7 +251,12 @@ public class ImageHandler : GLib.Object {
                             }
                         }
                     } else {
-                        Idle.add(() => {
+                                    Idle.add(() => {
+                                        if (window.fetch_sequence != gen_seq) {
+                                            try { window.append_debug_log("image-download: stale worker ignored for url=" + url); } catch (GLib.Error e) { }
+                                            try { window.pending_downloads.remove(url); } catch (GLib.Error e) { }
+                                            return false;
+                                        }
                             var list2 = window.pending_downloads.get(url);
                             if (list2 != null) {
                                 foreach (var pic in list2) { window.set_placeholder_image_for_source(pic, target_w, target_h, window.infer_source_from_url(url)); window.on_image_loaded(pic); }
@@ -281,6 +315,11 @@ public class ImageHandler : GLib.Object {
 
                             var pb_for_idle = pixbuf;
                             Idle.add(() => {
+                                if (window.fetch_sequence != gen_seq) {
+                                    try { window.append_debug_log("image-download: stale fallback ignored for url=" + url); } catch (GLib.Error e) { }
+                                    try { window.pending_downloads.remove(url); } catch (GLib.Error e) { }
+                                    return false;
+                                }
                                 try {
                                     var texture = Gdk.Texture.for_pixbuf(pb_for_idle);
                                     string size_key = window.make_cache_key(url, target_w, target_h);
@@ -335,6 +374,11 @@ public class ImageHandler : GLib.Object {
                     }
                 } else {
                     Idle.add(() => {
+                        if (window.fetch_sequence != gen_seq) {
+                            try { window.append_debug_log("image-download: stale HTTP case ignored for url=" + url); } catch (GLib.Error e) { }
+                            try { window.pending_downloads.remove(url); } catch (GLib.Error e) { }
+                            return false;
+                        }
                         var list = window.pending_downloads.get(url);
                         if (list != null) {
                             foreach (var pic in list) {
