@@ -200,9 +200,8 @@ public class ArticleWindow : GLib.Object {
         snippet_label.set_xalign(0);
         snippet_label.set_wrap(true);
         snippet_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR);
-        // Allow more lines in the preview (user requested more article text). The
-        // scrolled container already constrains total height so this can expand
-        // and be scrollable.
+        // Allow more lines in the preview. The scrolled container already 
+        // constrains total height so this can expand and be scrollable.
         snippet_label.set_lines(12);
         snippet_label.set_selectable(true);
         snippet_label.set_can_focus(false);  // Prevent cursor from appearing
@@ -275,7 +274,7 @@ public class ArticleWindow : GLib.Object {
                 back_btn_handler_id = 0;
             });
         } catch (GLib.Error e) { }
-        // Try to set metadata from any cached article entry (source + published time)
+    // Try to set metadata from any cached article entry (source + published time)
     var prefs = NewsPreferences.get_instance();
         string? homepage_published_any = null;
         string? explicit_source_name = null;
@@ -300,7 +299,7 @@ public class ArticleWindow : GLib.Object {
         // user's default (e.g. NewsPreferences.news_source) while multiple
         // preferred sources are enabled, try to derive a host-based name
         // from the article URL so we don't incorrectly show a specific
-    // provider like "The Guardian".
+        // provider like "The Guardian".
         string display_source = null;
         if (explicit_source_name != null && explicit_source_name.length > 0) {
             display_source = explicit_source_name;
@@ -336,14 +335,12 @@ public class ArticleWindow : GLib.Object {
             }
         }
 
-                // Debug traces removed from ArticleWindow
-
                 if (homepage_published_any != null && homepage_published_any.length > 0)
                     meta_label.set_text(display_source + " • " + format_published(homepage_published_any));
                 else
                     meta_label.set_text(display_source);
 
-        // Use homepage snippet for Fox News if available
+    // Use homepage snippet for Fox News if available
     if (article_src == NewsSource.FOX) {
             // Try to get snippet from parent_window/article_buffer
             string? homepage_snippet = null;
@@ -565,7 +562,7 @@ public class ArticleWindow : GLib.Object {
             return prefs.news_source;
         }
 
-    // Extract host portion from a URL (e.g., "https://www.example.com/path" -> "example.com").
+        // Extract host portion from a URL (e.g., "https://www.example.com/path" -> "example.com").
         private string extract_host_from_url(string? url) {
             if (url == null) return "";
             string u = url.strip();
@@ -585,9 +582,9 @@ public class ArticleWindow : GLib.Object {
             return u;
         }
 
-        // Turn a host like "example-news.co.uk" into a friendly display string
-        // such as "Example News". This is intentionally simple and is only
-        // used as a fallback when no explicit source name is available.
+    // Turn a host like "example-news.co.uk" into a friendly display string
+    // such as "Example News". This is intentionally simple and is only
+    // used as a fallback when no explicit source name is available.
     private string prettify_host(string host) {
             if (host == null) return "News";
             string h = host.strip();

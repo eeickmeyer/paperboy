@@ -23,10 +23,7 @@ using GLib;
 public class RSSFinder : Object {
     public static void main(string[] args) {
         // Accept a search string passed on the command line, e.g.:
-        //   rssFinder "New York"
-        // or
-        //   rssFinder --query "New York"
-        // Require a search string passed on the command line. No interactive input.
+        // rssFinder "New York" or rssFinder --query "New York"
         if (args.length == 0) {
             stderr.printf("Usage: rssFinder \"search terms\"\n");
             stderr.printf("Or: rssFinder --query \"search terms\"\n");
