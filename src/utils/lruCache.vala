@@ -1,9 +1,31 @@
+/*
+ * Copyright (C) 2025  Isaac Joseph <calamityjoe87@gmail.com>
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
+
+/* 
+ * Small generic LRU cache backed by Gee.HashMap and an order list.
+ * Intended for short-lived in-memory caches where simple bounded
+ * eviction is sufficient. Not optimized for extreme throughput.
+ */
+
 using GLib;
 using Gee;
 
-// Small generic LRU cache backed by Gee.HashMap and an order list.
-// Intended for short-lived in-memory caches where simple bounded
-// eviction is sufficient. Not optimized for extreme throughput.
+
 public class LruCache<K, V> : GLib.Object {
     private Gee.HashMap<K, V> map;
     private Gee.ArrayList<K> order;
