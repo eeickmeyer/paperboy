@@ -1,7 +1,25 @@
+/*
+ * Copyright (C) 2025  Isaac Joseph <calamityjoe87@gmail.com>
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ */
+
 using Gtk;
 using GLib;
 
-// (Debug getenv wrapper removed)
+
 
 namespace Managers {
 
@@ -175,8 +193,6 @@ public class LoadingStateManager : GLib.Object {
             bool is_local = prefs.category == "local_news";
             bool has_location = (prefs.user_location != null && prefs.user_location.length > 0) || (prefs.user_location_city != null && prefs.user_location_city.length > 0);
             needs_location = is_local && !has_location;
-
-            // (Debug logging removed)
         } catch (GLib.Error e) { needs_location = false; }
 
         try { local_news_message_box.set_visible(needs_location); } catch (GLib.Error e) { }
@@ -228,7 +244,6 @@ public class LoadingStateManager : GLib.Object {
             }
 
             // Note: load_more_button is now managed by ArticleManager, so we don't need to remove it here
-
             var end_label = new Gtk.Label("<b>No more articles</b>");
             end_label.set_use_markup(true);
             end_label.add_css_class("dim-label");
@@ -240,4 +255,4 @@ public class LoadingStateManager : GLib.Object {
     }
 }
 
-} // namespace Managers
+}

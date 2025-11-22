@@ -663,13 +663,13 @@ public class PrefsDialog : GLib.Object {
         personalized_row.set_subtitle("Enable a personalized feed based on your reading habits");
         var personalized_switch = new Gtk.Switch();
         personalized_switch.set_active(prefs.personalized_feed_enabled);
-    // Ensure the switch uses normal sizing inside the ActionRow suffix
-    personalized_switch.set_halign(Gtk.Align.END);
-    personalized_switch.set_valign(Gtk.Align.CENTER);
-    personalized_switch.set_hexpand(false);
-    personalized_switch.set_vexpand(false);
-    personalized_switch.set_margin_top(0);
-    personalized_switch.set_margin_bottom(0);
+        // Ensure the switch uses normal sizing inside the ActionRow suffix
+        personalized_switch.set_halign(Gtk.Align.END);
+        personalized_switch.set_valign(Gtk.Align.CENTER);
+        personalized_switch.set_hexpand(false);
+        personalized_switch.set_vexpand(false);
+        personalized_switch.set_margin_top(0);
+        personalized_switch.set_margin_bottom(0);
         // When toggled, we'll persist the preference and update the
         // settings button and main window UI below (handler attached
         // after the settings button is created).
