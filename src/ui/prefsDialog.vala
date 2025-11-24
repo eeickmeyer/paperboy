@@ -1,10 +1,10 @@
 /*
  * Copyright (C) 2025  Isaac Joseph <calamityjoe87@gmail.com>
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -12,9 +12,9 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
+
 
 using Gtk;
 using Adw;
@@ -376,21 +376,31 @@ public class PrefsDialog : GLib.Object {
                     msg.request_headers.append("Accept", "image/png,image/x-icon,image/svg+xml,image/*;q=0.8");
                     session.send_message(msg);
                     if (msg.status_code == 200 && msg.response_body.length > 0) {
+                        // Use flatten() to get Soup.Buffer (libsoup-2.4)
+                        Soup.Buffer body_buffer = msg.response_body.flatten();
+                        unowned uint8[] body_data = body_buffer.data;
+
+                        uint8[] data = new uint8[body_data.length];
+                        Memory.copy(data, body_data, body_data.length);
+
+                        // Explicitly free the buffer to prevent leak
+                        body_buffer = null;
+
                         Idle.add(() => {
                             try {
                                 var loader = new Gdk.PixbufLoader();
-                                uint8[] data = new uint8[msg.response_body.length];
-                                Memory.copy(data, msg.response_body.data, (size_t) msg.response_body.length);
                                 loader.write(data);
                                 loader.close();
                                 var pixbuf = loader.get_pixbuf();
                                 if (pixbuf != null) {
-                                    // Scale to 24x24 with high quality interpolation
-                                    var scaled = pixbuf.scale_simple(24, 24, Gdk.InterpType.HYPER);
-                                    if (scaled != null) {
-                                        var texture = Gdk.Texture.for_pixbuf(scaled);
-                                        image.set_from_paintable(texture);
-                                    }
+                                    try {
+                                        string k = "pixbuf::url:%s::%dx%d".printf(url, 24, 24);
+                                        var scaled = ImageCache.get_global().get_or_scale_pixbuf(k, pixbuf, 24, 24);
+                                        if (scaled != null) {
+                                            var texture = Gdk.Texture.for_pixbuf(scaled);
+                                            image.set_from_paintable(texture);
+                                        }
+                                    } catch (GLib.Error e) { }
                                 }
                             } catch (GLib.Error e) {
                                 // keep placeholder
@@ -663,13 +673,13 @@ public class PrefsDialog : GLib.Object {
         personalized_row.set_subtitle("Enable a personalized feed based on your reading habits");
         var personalized_switch = new Gtk.Switch();
         personalized_switch.set_active(prefs.personalized_feed_enabled);
-    // Ensure the switch uses normal sizing inside the ActionRow suffix
-    personalized_switch.set_halign(Gtk.Align.END);
-    personalized_switch.set_valign(Gtk.Align.CENTER);
-    personalized_switch.set_hexpand(false);
-    personalized_switch.set_vexpand(false);
-    personalized_switch.set_margin_top(0);
-    personalized_switch.set_margin_bottom(0);
+        // Ensure the switch uses normal sizing inside the ActionRow suffix
+        personalized_switch.set_halign(Gtk.Align.END);
+        personalized_switch.set_valign(Gtk.Align.CENTER);
+        personalized_switch.set_hexpand(false);
+        personalized_switch.set_vexpand(false);
+        personalized_switch.set_margin_top(0);
+        personalized_switch.set_margin_bottom(0);
         // When toggled, we'll persist the preference and update the
         // settings button and main window UI below (handler attached
         // after the settings button is created).

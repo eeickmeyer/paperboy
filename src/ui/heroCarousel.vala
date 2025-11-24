@@ -1,10 +1,10 @@
 /*
  * Copyright (C) 2025  Isaac Joseph <calamityjoe87@gmail.com>
  *
- * This program is free software; you can redistribute it and/or
- * modify it under the terms of the GNU General Public License
- * as published by the Free Software Foundation; either version 2
- * of the License, or (at your option) any later version.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -12,8 +12,7 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
  */
 
 using Gtk;
@@ -32,15 +31,13 @@ public class HeroCarousel : GLib.Object {
     public HeroCarousel(Gtk.Box parent) {
         GLib.Object();
         // Create title and container
-        var top_stories_title = new Gtk.Label("TOP STORIES");
+        var top_stories_title = new Gtk.Label("");
         top_stories_title.set_xalign(0);
         top_stories_title.add_css_class("caption");
-        var title_attrs = new Pango.AttrList();
-        title_attrs.insert(Pango.attr_weight_new(Pango.Weight.BOLD));
-        top_stories_title.set_attributes(title_attrs);
+        // Use Pango markup to match the subtitle sizing used elsewhere.
+        try { top_stories_title.set_markup("<span size='11000'><b>TOP STORIES</b></span>"); } catch (GLib.Error e) { top_stories_title.set_text("TOP STORIES"); }
         top_stories_title.set_margin_bottom(6);
         try { parent.append(top_stories_title); } catch (GLib.Error e) { }
-
         widgets = new ArrayList<Widget>();
         dot_widgets = new ArrayList<Label>();
 
